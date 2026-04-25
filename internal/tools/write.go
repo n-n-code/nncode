@@ -13,9 +13,12 @@ import (
 // Write returns the write file tool.
 func Write(options ...Options) agent.Tool {
 	opts := resolveOptions(options)
+
 	return agent.Tool{
-		Name:        "write",
-		Description: "Write content to a file at the given path. Creates parent directories if they don't exist. Use this to create new files or overwrite existing ones.",
+		Name: "write",
+		Description: "Write content to a file at the given path. " +
+			"Creates parent directories if they don't exist. " +
+			"Use this to create new files or overwrite existing ones.",
 		Parameters: `{
 			"type": "object",
 			"properties": {
@@ -30,35 +33,51 @@ func Write(options ...Options) agent.Tool {
 			},
 			"required": ["path", "content"]
 		}`,
-		Execute: func(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
+		Execute: func(_ context.Context, args json.RawMessage) (agent.ToolResult, error) {
 			var params struct {
 				Path    string `json:"path"`
 				Content string `json:"content"`
 			}
-			if err := json.Unmarshal(args, &params); err != nil {
-				return agent.ToolResult{Content: "Invalid arguments", IsError: true}, nil
+
+			err := json.Unmarshal(args, &params)
+			if err != nil {
+				return agent.ToolResult{ //nolint:nilerr // tool errors surface via ToolResult
+					Content: "Invalid arguments", IsError: true,
+				}, nil
 			}
+
 			if len(params.Content) > opts.MaxWriteBytes {
 				return agent.ToolResult{
-					Content: fmt.Sprintf("Content is %d bytes, which exceeds the write limit of %d bytes", len(params.Content), opts.MaxWriteBytes),
+					Content: fmt.Sprintf(
+						"Content is %d bytes, which exceeds the write limit of %d bytes",
+						len(params.Content), opts.MaxWriteBytes,
+					),
 					IsError: true,
 				}, nil
 			}
 
 			path, err := resolvePath(params.Path, opts)
 			if err != nil {
-				return agent.ToolResult{Content: err.Error(), IsError: true}, nil
+				return agent.ToolResult{ //nolint:nilerr // tool errors surface via ToolResult
+					Content: err.Error(), IsError: true,
+				}, nil
 			}
 
 			dir := filepath.Dir(path)
 			if dir != "." && dir != "/" {
-				if err := os.MkdirAll(dir, 0755); err != nil {
-					return agent.ToolResult{Content: fmt.Sprintf("Failed to create directory: %s", err.Error()), IsError: true}, nil
+				err = os.MkdirAll(dir, dirMode)
+				if err != nil {
+					return agent.ToolResult{ //nolint:nilerr // tool errors surface via ToolResult
+						Content: "Failed to create directory: " + err.Error(), IsError: true,
+					}, nil
 				}
 			}
 
-			if err := os.WriteFile(path, []byte(params.Content), 0644); err != nil {
-				return agent.ToolResult{Content: fmt.Sprintf("Failed to write file: %s", err.Error()), IsError: true}, nil
+			err = os.WriteFile(path, []byte(params.Content), fileMode)
+			if err != nil {
+				return agent.ToolResult{ //nolint:nilerr // tool errors surface via ToolResult
+					Content: "Failed to write file: " + err.Error(), IsError: true,
+				}, nil
 			}
 
 			return agent.ToolResult{

@@ -19,6 +19,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func newStreamClient(t *testing.T, statusCode int, body string, captured *http.Request) *OpenAIClient {
 	t.Helper()
+
 	return &OpenAIClient{
 		HTTPClient: &http.Client{
 			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -27,9 +28,11 @@ func newStreamClient(t *testing.T, statusCode int, body string, captured *http.R
 					if err != nil {
 						return nil, err
 					}
+
 					*captured = *r.Clone(r.Context())
 					captured.Body = io.NopCloser(strings.NewReader(string(body)))
 				}
+
 				return &http.Response{
 					StatusCode: statusCode,
 					Status:     fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
@@ -44,8 +47,11 @@ func newStreamClient(t *testing.T, statusCode int, body string, captured *http.R
 
 func collectEvents(t *testing.T, ch <-chan StreamEvent) []StreamEvent {
 	t.Helper()
+
 	var out []StreamEvent
+
 	timeout := time.After(2 * time.Second)
+
 	for {
 		select {
 		case <-timeout:
@@ -54,6 +60,7 @@ func collectEvents(t *testing.T, ch <-chan StreamEvent) []StreamEvent {
 			if !ok {
 				return out
 			}
+
 			out = append(out, ev)
 		}
 	}
@@ -67,9 +74,11 @@ func TestStream_TextOnly(t *testing.T) {
 		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n",
 		"data: [DONE]\n",
 	}
+
 	var req http.Request
 
 	c := newStreamClient(t, http.StatusOK, strings.Join(chunks, ""), &req)
+
 	ch, err := c.Stream(context.Background(), Request{
 		Model:  Model{ID: "gpt-test", BaseURL: "http://example.test"},
 		APIKey: "unit-test-api-key",
@@ -80,30 +89,40 @@ func TestStream_TextOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
+
 	events := collectEvents(t, ch)
 
-	var text strings.Builder
-	var done *Done
+	var (
+		text strings.Builder
+		done *Done
+	)
+
 	for _, ev := range events {
 		if ev.Text != "" {
 			text.WriteString(ev.Text)
 		}
+
 		if ev.Done != nil {
 			done = ev.Done
 		}
+
 		if ev.Err != nil {
 			t.Fatalf("unexpected error event: %v", ev.Err)
 		}
 	}
+
 	if text.String() != "Hello, world" {
 		t.Fatalf("text = %q, want %q", text.String(), "Hello, world")
 	}
+
 	if done == nil {
 		t.Fatalf("no Done event")
 	}
+
 	if done.StopReason != "stop" {
 		t.Errorf("StopReason = %q, want %q", done.StopReason, "stop")
 	}
+
 	if done.Usage.TotalTokens != 12 {
 		t.Errorf("Usage.TotalTokens = %d, want 12", done.Usage.TotalTokens)
 	}
@@ -111,20 +130,26 @@ func TestStream_TextOnly(t *testing.T) {
 	if auth := req.Header.Get("Authorization"); auth != "Bearer unit-test-api-key" {
 		t.Errorf("Authorization header = %q, want %q", auth, "Bearer unit-test-api-key")
 	}
+
 	if ct := req.Header.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
+
 	if req.URL.Path != "/chat/completions" {
 		t.Errorf("URL path = %q, want /chat/completions", req.URL.Path)
 	}
+
 	bodyBytes, _ := io.ReadAll(req.Body)
+
 	var sent chatRequest
 	if err := json.Unmarshal(bodyBytes, &sent); err != nil {
 		t.Fatalf("unmarshal sent body: %v", err)
 	}
+
 	if sent.Model != "gpt-test" {
 		t.Errorf("sent model = %q, want gpt-test", sent.Model)
 	}
+
 	if !sent.Stream {
 		t.Error("sent stream=false, want true")
 	}
@@ -141,6 +166,7 @@ func TestStream_ToolCall(t *testing.T) {
 	}
 
 	c := newStreamClient(t, http.StatusOK, strings.Join(chunks, ""), nil)
+
 	ch, err := c.Stream(context.Background(), Request{
 		Model: Model{ID: "gpt-test", BaseURL: "http://example.test"},
 		Messages: []Message{
@@ -153,36 +179,48 @@ func TestStream_ToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
+
 	events := collectEvents(t, ch)
 
-	var start, end *ToolCall
-	var done *Done
+	var (
+		start, end *ToolCall
+		done       *Done
+	)
+
 	for _, ev := range events {
 		if ev.ToolStart != nil {
 			start = ev.ToolStart
 		}
+
 		if ev.ToolEnd != nil {
 			end = ev.ToolEnd
 		}
+
 		if ev.Done != nil {
 			done = ev.Done
 		}
+
 		if ev.Err != nil {
 			t.Fatalf("unexpected error event: %v", ev.Err)
 		}
 	}
+
 	if start == nil {
 		t.Fatalf("no ToolStart event")
 	}
+
 	if start.Name != "read" || start.ID != "call_1" {
 		t.Errorf("ToolStart = %+v", start)
 	}
+
 	if end == nil {
 		t.Fatalf("no ToolEnd event")
 	}
+
 	if end.Name != "read" || string(end.Args) != `{"path":"main.go"}` {
 		t.Errorf("ToolEnd = {ID:%s Name:%s Args:%s}", end.ID, end.Name, string(end.Args))
 	}
+
 	if done == nil || done.StopReason != "tool_calls" {
 		t.Errorf("Done = %+v", done)
 	}
@@ -190,6 +228,7 @@ func TestStream_ToolCall(t *testing.T) {
 
 func TestStream_HTTPError(t *testing.T) {
 	c := newStreamClient(t, http.StatusUnauthorized, `{"error":{"message":"Invalid API key"}}`, nil)
+
 	_, err := c.Stream(context.Background(), Request{
 		Model:  Model{ID: "gpt-test", BaseURL: "http://example.test"},
 		APIKey: "bad-unit-test-api-key",
@@ -197,6 +236,7 @@ func TestStream_HTTPError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+
 	if !strings.Contains(err.Error(), "HTTP 401") {
 		t.Errorf("err = %v, want HTTP 401", err)
 	}
@@ -217,16 +257,19 @@ func TestStream_ContextCancel(t *testing.T) {
 			}),
 		},
 	}
+
 	ch, err := c.Stream(ctx, Request{Model: Model{ID: "gpt-test", BaseURL: "http://example.test"}})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
+
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
 
 	timeout := time.After(2 * time.Second)
+
 	for {
 		select {
 		case <-timeout:
@@ -275,10 +318,12 @@ func TestBuildRequestBody_ToolMessages(t *testing.T) {
 			{Name: "read", Description: "reads", Parameters: `{"type":"object"}`},
 		},
 	}
+
 	body, err := buildRequestBody(req)
 	if err != nil {
 		t.Fatalf("buildRequestBody: %v", err)
 	}
+
 	var decoded struct {
 		Messages []struct {
 			Role      string `json:"role"`
@@ -302,21 +347,27 @@ func TestBuildRequestBody_ToolMessages(t *testing.T) {
 		} `json:"tools"`
 		ToolChoice string `json:"tool_choice"`
 	}
+
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, string(body))
 	}
+
 	if len(decoded.Messages) != 4 {
 		t.Fatalf("expected 4 messages, got %d", len(decoded.Messages))
 	}
+
 	if decoded.Messages[2].ToolCalls[0].Function.Arguments != `{"path":"main.go"}` {
 		t.Errorf("tool call args round-trip broken: %q", decoded.Messages[2].ToolCalls[0].Function.Arguments)
 	}
+
 	if decoded.Messages[3].ToolCallID != "c1" {
 		t.Errorf("tool result tool_call_id = %q, want c1", decoded.Messages[3].ToolCallID)
 	}
+
 	if decoded.ToolChoice != "auto" {
 		t.Errorf("ToolChoice = %q, want auto", decoded.ToolChoice)
 	}
+
 	if string(decoded.Tools[0].Function.Parameters) != `{"type":"object"}` {
 		t.Errorf("tool parameters = %s", string(decoded.Tools[0].Function.Parameters))
 	}

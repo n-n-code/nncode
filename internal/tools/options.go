@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,13 @@ const (
 	defaultMaxWriteBytes      = 1000000
 	defaultMaxBashOutputBytes = 10000
 	defaultBashTimeout        = 120 * time.Second
+	fileMode                  = 0o644
+	dirMode                   = 0o755
+)
+
+var (
+	errPathRequired = errors.New("path is required")
+	errPathOutside  = errors.New("path is outside workspace root")
 )
 
 // Options configures built-in tool limits. Zero values use the package defaults.
@@ -33,29 +41,36 @@ func resolveOptions(options []Options) Options {
 	if len(options) == 0 {
 		return out
 	}
-	in := options[0]
-	if in.RootDir != "" {
-		out.RootDir = in.RootDir
+
+	src := options[0]
+	if src.RootDir != "" {
+		out.RootDir = src.RootDir
 	}
-	if in.MaxReadBytes > 0 {
-		out.MaxReadBytes = in.MaxReadBytes
+
+	if src.MaxReadBytes > 0 {
+		out.MaxReadBytes = src.MaxReadBytes
 	}
-	if in.MaxWriteBytes > 0 {
-		out.MaxWriteBytes = in.MaxWriteBytes
+
+	if src.MaxWriteBytes > 0 {
+		out.MaxWriteBytes = src.MaxWriteBytes
 	}
-	if in.MaxBashOutputBytes > 0 {
-		out.MaxBashOutputBytes = in.MaxBashOutputBytes
+
+	if src.MaxBashOutputBytes > 0 {
+		out.MaxBashOutputBytes = src.MaxBashOutputBytes
 	}
-	if in.BashTimeout > 0 {
-		out.BashTimeout = in.BashTimeout
+
+	if src.BashTimeout > 0 {
+		out.BashTimeout = src.BashTimeout
 	}
+
 	return out
 }
 
 func resolvePath(path string, opts Options) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("path is required")
+		return "", errPathRequired
 	}
+
 	if opts.RootDir == "" {
 		return path, nil
 	}
@@ -69,6 +84,7 @@ func resolvePath(path string, opts Options) (string, error) {
 	if !filepath.IsAbs(candidate) {
 		candidate = filepath.Join(root, candidate)
 	}
+
 	candidate, err = filepath.Abs(candidate)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
@@ -78,15 +94,18 @@ func resolvePath(path string, opts Options) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("compare path to workspace root: %w", err)
 	}
+
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("path %q is outside workspace root %q", path, root)
+		return "", fmt.Errorf("%w: %q (root %q)", errPathOutside, path, root)
 	}
+
 	return candidate, nil
 }
 
-func truncateBytes(s string, max int, suffix string) (string, bool) {
-	if max <= 0 || len(s) <= max {
+func truncateBytes(s string, limit int, suffix string) (string, bool) {
+	if limit <= 0 || len(s) <= limit {
 		return s, false
 	}
-	return s[:max] + suffix, true
+
+	return s[:limit] + suffix, true
 }

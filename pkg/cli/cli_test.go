@@ -32,14 +32,18 @@ func (m *mockClient) Stream(ctx context.Context, req llm.Request) (<-chan llm.St
 	if m.err != nil {
 		return nil, m.err
 	}
+
 	events := m.events
 	if len(m.scripts) > 0 {
 		events = m.scripts[0]
 		m.scripts = m.scripts[1:]
 	}
+
 	ch := make(chan llm.StreamEvent, len(events))
+
 	go func() {
 		defer close(ch)
+
 		for _, ev := range events {
 			select {
 			case <-ctx.Done():
@@ -48,6 +52,7 @@ func (m *mockClient) Stream(ctx context.Context, req llm.Request) (<-chan llm.St
 			}
 		}
 	}()
+
 	return ch, nil
 }
 
@@ -60,6 +65,7 @@ func textEvents(text string) []llm.StreamEvent {
 
 func toolCallEvents(id string, name string, args string) []llm.StreamEvent {
 	call := llm.ToolCall{ID: id, Name: name, Args: json.RawMessage(args)}
+
 	return []llm.StreamEvent{
 		{ToolStart: &call},
 		{ToolEnd: &call},
@@ -79,7 +85,9 @@ func testConfig() *config.Config {
 func TestRun_PipedEmptyStdinExitsWithoutCallingAgent(t *testing.T) {
 	client := &mockClient{events: textEvents("unused")}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader(""), &out, &errOut, false))
 
 	err := c.RunContext(context.Background())
@@ -92,9 +100,12 @@ func TestRun_PipedEmptyStdinExitsWithoutCallingAgent(t *testing.T) {
 
 func TestRun_PipedPromptStreamsAndSavesSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	client := &mockClient{events: textEvents("hello")}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("say hi"), &out, &errOut, false))
 
 	err := c.RunContext(context.Background())
@@ -108,6 +119,7 @@ func TestRun_PipedPromptStreamsAndSavesSession(t *testing.T) {
 
 func TestRun_PipedWarnsOnSilentReadOnlyTurn(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	client := &mockClient{scripts: [][]llm.StreamEvent{
 		toolCallEvents("c1", "read", `{"path":"README.md"}`),
 		{{Done: &llm.Done{StopReason: "stop"}}},
@@ -126,7 +138,9 @@ func TestRun_PipedWarnsOnSilentReadOnlyTurn(t *testing.T) {
 		},
 	}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client, Tools: []agent.Tool{tool}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("inspect"), &out, &errOut, false))
 
 	err := c.RunContext(context.Background())
@@ -139,6 +153,7 @@ func TestRun_PipedWarnsOnSilentReadOnlyTurn(t *testing.T) {
 
 func TestRun_PipedStrictReturnsIncompleteOnSilentReadOnlyTurn(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	client := &mockClient{scripts: [][]llm.StreamEvent{
 		toolCallEvents("c1", "read", `{"path":"README.md"}`),
 		{{Done: &llm.Done{StopReason: "stop"}}},
@@ -151,7 +166,9 @@ func TestRun_PipedStrictReturnsIncompleteOnSilentReadOnlyTurn(t *testing.T) {
 		},
 	}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client, Tools: []agent.Tool{tool}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("inspect"), &out, &errOut, false), WithStrictPiped(true))
 
 	err := c.RunContext(context.Background())
@@ -163,6 +180,7 @@ func TestRun_PipedStrictReturnsIncompleteOnSilentReadOnlyTurn(t *testing.T) {
 
 func TestRun_PipedDoesNotWarnOnEffectfulToolOnlyTurn(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	client := &mockClient{scripts: [][]llm.StreamEvent{
 		toolCallEvents("c1", "write", `{"path":"main.go","content":"package main"}`),
 		{{Done: &llm.Done{StopReason: "stop"}}},
@@ -181,7 +199,9 @@ func TestRun_PipedDoesNotWarnOnEffectfulToolOnlyTurn(t *testing.T) {
 		},
 	}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client, Tools: []agent.Tool{tool}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("write"), &out, &errOut, false), WithStrictPiped(true))
 
 	err := c.RunContext(context.Background())
@@ -193,9 +213,12 @@ func TestRun_PipedDoesNotWarnOnEffectfulToolOnlyTurn(t *testing.T) {
 
 func TestRun_PipedPromptReturnsAgentError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	client := &mockClient{err: errors.New("boom")}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("fail"), &out, &errOut, false))
 
 	err := c.RunContext(context.Background())
@@ -208,15 +231,19 @@ func TestRun_PipedPromptReturnsAgentError(t *testing.T) {
 
 func TestRun_InteractiveCommands(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	tool := agent.Tool{Name: "read", Description: "reads files", Parameters: "{}"}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}, Tools: []agent.Tool{tool}}, "system prompt")
+
 	var out, errOut bytes.Buffer
+
 	input := strings.NewReader("/help\n/tools\n/prompt\n/session\n/quit\n")
 	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true))
 
 	err := c.RunContext(context.Background())
 
 	require.NoError(t, err)
+
 	text := out.String()
 	assert.Contains(t, text, "/sessions")
 	assert.Contains(t, text, "/resume <id|path>")
@@ -236,13 +263,16 @@ func TestRun_InteractiveSkillsCommandAndManualActivation(t *testing.T) {
 	reg := skills.Discover(skills.DiscoverOptions{CWD: root, HomeDir: t.TempDir()})
 	activator := skills.NewActivator(reg)
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	input := strings.NewReader("/skills\n/skill:manual\n/session\n/quit\n")
 	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true), WithSkills(reg, activator))
 
 	err := c.RunContext(context.Background())
 
 	require.NoError(t, err)
+
 	text := out.String()
 	assert.Contains(t, text, "go")
 	assert.Contains(t, text, "[manual]")
@@ -258,17 +288,21 @@ func TestRun_SkillsCommandTruncatesLongDescriptions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0755))
+
 	longDescription := strings.Repeat("long description ", 20)
 	writeCLITestSkill(t, root, "verbose", "name: verbose\ndescription: "+longDescription+"\n", "# Verbose")
 	reg := skills.Discover(skills.DiscoverOptions{CWD: root, HomeDir: t.TempDir()})
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	input := strings.NewReader("/skills\n/quit\n")
 	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true), WithSkills(reg, skills.NewActivator(reg)))
 
 	err := c.RunContext(context.Background())
 
 	require.NoError(t, err)
+
 	text := out.String()
 	assert.Contains(t, text, "verbose")
 	assert.Contains(t, text, "…")
@@ -285,7 +319,9 @@ func TestRun_SkillCommandWithPromptRunsAfterActivation(t *testing.T) {
 	activator := skills.NewActivator(reg)
 	client := &mockClient{events: textEvents("done")}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
 	var out, errOut bytes.Buffer
+
 	input := strings.NewReader("/skill:go use it\n/quit\n")
 	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true), WithSkills(reg, activator))
 
@@ -294,6 +330,7 @@ func TestRun_SkillCommandWithPromptRunsAfterActivation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, client.calls)
 	assert.Contains(t, out.String(), "done")
+
 	msgs := ag.Messages()
 	require.Len(t, msgs, 3)
 	assert.Equal(t, llm.RoleSystem, msgs[0].Role)
@@ -304,6 +341,7 @@ func TestRun_SkillCommandWithPromptRunsAfterActivation(t *testing.T) {
 
 func TestRun_ToolResultPreviewHidesActivationMarker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	client := &mockClient{scripts: [][]llm.StreamEvent{
 		toolCallEvents("c1", "activate_skill", `{"name":"go"}`),
 		textEvents("done"),
@@ -316,7 +354,9 @@ func TestRun_ToolResultPreviewHidesActivationMarker(t *testing.T) {
 		},
 	}
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client, Tools: []agent.Tool{tool}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("use go"), &out, &errOut, false))
 
 	err := c.RunContext(context.Background())
@@ -331,13 +371,16 @@ func TestRun_ToolResultPreviewHidesActivationMarker(t *testing.T) {
 
 func TestRun_InteractiveListsAndResumesSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
 	saved := session.New()
 	saved.AddMessage(llm.Message{Role: llm.RoleUser, Content: "hello"})
 	saved.AddMessage(llm.Message{Role: llm.RoleAssistant, Content: "hi"})
 	require.NoError(t, saved.Save(""))
 
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+
 	var out, errOut bytes.Buffer
+
 	input := strings.NewReader("/sessions\n/resume " + saved.ID + "\n/session\n/quit\n")
 	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true))
 
@@ -345,6 +388,7 @@ func TestRun_InteractiveListsAndResumesSession(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, ag.Messages(), 2)
+
 	text := out.String()
 	assert.Contains(t, text, saved.ID)
 	assert.Contains(t, text, "Resumed session")
@@ -354,6 +398,7 @@ func TestRun_InteractiveListsAndResumesSession(t *testing.T) {
 
 func writeCLITestSkill(t *testing.T, root string, dirName string, frontmatter string, body string) {
 	t.Helper()
+
 	dir := filepath.Join(root, ".agents", "skills", dirName)
 	require.NoError(t, os.MkdirAll(dir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\n"+frontmatter+"---\n"+body), 0644))

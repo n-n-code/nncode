@@ -16,6 +16,7 @@ import (
 
 func writeToolTestSkill(t *testing.T, root string, dirName string, frontmatter string, body string) {
 	t.Helper()
+
 	dir := filepath.Join(root, ".agents", "skills", dirName)
 	require.NoError(t, os.MkdirAll(dir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\n"+frontmatter+"---\n"+body), 0644))
@@ -77,10 +78,12 @@ func TestActivateSkillToolSchemaUsesVisibleEnum(t *testing.T) {
 func TestActivateSkillToolSchemaUsesCappedCatalog(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0755))
-	for i := 0; i < 65; i++ {
+
+	for i := range 65 {
 		name := fmt.Sprintf("skill-%02d", i)
 		writeToolTestSkill(t, root, name, fmt.Sprintf("name: %s\ndescription: skill %d\n", name, i), "# Skill")
 	}
+
 	reg := skills.Discover(skills.DiscoverOptions{CWD: root, HomeDir: t.TempDir()})
 	tool := ActivateSkill(skills.NewActivator(reg))
 

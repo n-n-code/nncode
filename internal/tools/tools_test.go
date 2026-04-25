@@ -98,9 +98,9 @@ func TestEdit_Success(t *testing.T) {
 	require.NoError(t, os.WriteFile(testFile, []byte(original), 0644))
 
 	args, _ := json.Marshal(map[string]string{
-		"path":      testFile,
-		"oldString": "world",
-		"newString": "universe",
+		"path":       testFile,
+		"old_string": "world",
+		"new_string": "universe",
 	})
 	result, err := Edit().Execute(context.Background(), args)
 
@@ -118,9 +118,9 @@ func TestEdit_StringNotFound(t *testing.T) {
 	require.NoError(t, os.WriteFile(testFile, []byte("hello world"), 0644))
 
 	args, _ := json.Marshal(map[string]string{
-		"path":      testFile,
-		"oldString": "nonexistent",
-		"newString": "replaced",
+		"path":       testFile,
+		"old_string": "nonexistent",
+		"new_string": "replaced",
 	})
 	result, err := Edit().Execute(context.Background(), args)
 
@@ -135,9 +135,9 @@ func TestEdit_ExactMatchRequired(t *testing.T) {
 	require.NoError(t, os.WriteFile(testFile, []byte("hello  world"), 0644))
 
 	args, _ := json.Marshal(map[string]string{
-		"path":      testFile,
-		"oldString": "hello world",
-		"newString": "hi there",
+		"path":       testFile,
+		"old_string": "hello world",
+		"new_string": "hi there",
 	})
 	result, err := Edit().Execute(context.Background(), args)
 
@@ -147,9 +147,9 @@ func TestEdit_ExactMatchRequired(t *testing.T) {
 
 func TestEdit_FileNotFound(t *testing.T) {
 	args, _ := json.Marshal(map[string]string{
-		"path":      "/nonexistent/file.txt",
-		"oldString": "foo",
-		"newString": "bar",
+		"path":       "/nonexistent/file.txt",
+		"old_string": "foo",
+		"new_string": "bar",
 	})
 	result, err := Edit().Execute(context.Background(), args)
 
@@ -185,10 +185,12 @@ func TestBash_InvalidArgs(t *testing.T) {
 func TestRead_LargeFileTruncation(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "large.txt")
+
 	largeContent := make([]byte, 60000)
 	for i := range largeContent {
 		largeContent[i] = 'a'
 	}
+
 	require.NoError(t, os.WriteFile(testFile, largeContent, 0644))
 
 	args, _ := json.Marshal(map[string]string{"path": testFile})
@@ -231,15 +233,15 @@ func TestEdit_RejectsEmptyOldString(t *testing.T) {
 	require.NoError(t, os.WriteFile(testFile, []byte("hello"), 0644))
 
 	args, _ := json.Marshal(map[string]string{
-		"path":      testFile,
-		"oldString": "",
-		"newString": "x",
+		"path":       testFile,
+		"old_string": "",
+		"new_string": "x",
 	})
 	result, err := Edit().Execute(context.Background(), args)
 
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content, "oldString")
+	assert.Contains(t, result.Content, "old_string")
 }
 
 func TestTools_WorkspaceRootAllowsRelativePathInsideRoot(t *testing.T) {
@@ -301,6 +303,7 @@ func TestPatch_UpdatesExistingFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "main.go")
 	require.NoError(t, os.WriteFile(testFile, []byte("package main\n\nfunc main() {}\n"), 0644))
+
 	patch := `--- a/main.go
 +++ b/main.go
 @@ -1,3 +1,5 @@
@@ -318,6 +321,7 @@ func TestPatch_UpdatesExistingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	assert.Equal(t, 1, result.Metadata["files_changed"])
+
 	data, err := os.ReadFile(testFile)
 	require.NoError(t, err)
 	assert.Equal(t, "package main\n\nfunc main() {\n\tprintln(\"hi\")\n}\n", string(data))
@@ -337,6 +341,7 @@ func TestPatch_CreatesNewFile(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
+
 	data, err := os.ReadFile(filepath.Join(tmpDir, "new.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello\nworld\n", string(data))
@@ -345,6 +350,7 @@ func TestPatch_CreatesNewFile(t *testing.T) {
 func TestPatch_RejectsMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("actual\n"), 0644))
+
 	patch := `--- a/file.txt
 +++ b/file.txt
 @@ -1,1 +1,1 @@

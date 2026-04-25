@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"nncode/internal/agent"
@@ -27,8 +28,18 @@ verify your work by running commands when it makes sense.
 
 Be concise. When the task is done, stop.`
 
+const defaultDoctorTimeout = 10 * time.Second
+
+var (
+	errUnexpectedArg       = errors.New("unexpected argument")
+	errUnexpectedDoctorArg = errors.New("unexpected doctor argument")
+	errModelNotConfigured  = errors.New("model is not configured")
+	errDoctorFoundProblems = errors.New("doctor found problems")
+)
+
 func main() {
-	if err := run(); err != nil {
+	err := run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -48,25 +59,38 @@ func runWithArgs(args []string) error {
 	modelFlag := flags.String("model", "", "model name to use (overrides default_model from config)")
 	resumeFlag := flags.String("resume", "", "session ID or path to resume before running")
 	checkFlag := flags.Bool("check", false, "run setup diagnostics and exit")
-	strictFlag := flags.Bool("strict", false, "in piped mode, exit non-zero if the agent produces no response and no effectful tool call")
-	if err := flags.Parse(args); err != nil {
+
+	strictFlag := flags.Bool("strict", false,
+		"in piped mode, exit non-zero if the agent produces no response and no successful effectful tool call")
+
+	err := flags.Parse(args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+
+		return fmt.Errorf("parse flags: %w", err)
 	}
+
 	if flags.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+		return fmt.Errorf("%w: %q", errUnexpectedArg, flags.Arg(0))
 	}
 
 	cfg, err := loadMergedConfig()
 	if err != nil {
 		return err
 	}
-	if *checkFlag {
-		return runDoctorReport(cfg, *modelFlag, false, 10*time.Second)
+
+	if *modelFlag != "" {
+		cfg.AutoVendModel(*modelFlag)
 	}
-	if err := cfg.Validate(); err != nil {
+
+	if *checkFlag {
+		return runDoctorReport(cfg, *modelFlag, false, defaultDoctorTimeout)
+	}
+
+	err = cfg.Validate()
+	if err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
@@ -78,11 +102,14 @@ func loadMergedConfig() (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+
 	proj, err := config.LoadProject()
 	if err != nil {
 		return nil, fmt.Errorf("load project config: %w", err)
 	}
+
 	cfg.Merge(proj)
+
 	return cfg, nil
 }
 
@@ -91,28 +118,35 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 	if modelName == "" {
 		modelName = cfg.DefaultModel
 	}
+
 	modelCfg, ok := cfg.ResolveModel(modelName)
 	if !ok {
-		return fmt.Errorf("model %q is not configured", modelName)
+		return fmt.Errorf("%w: %q", errModelNotConfigured, modelName)
 	}
-	if err := modelCfg.Validate(modelName); err != nil {
-		return err
+
+	err := modelCfg.Validate(modelName)
+	if err != nil {
+		return fmt.Errorf("validate model %q: %w", modelName, err)
 	}
+
 	model := buildModel(modelName, modelCfg)
 
 	skillRegistry := skills.Discover(skills.DiscoverOptions{})
 	skillActivator := skills.NewActivator(skillRegistry)
-	sysPrompt := skills.ComposeSystemPrompt(loadSystemPrompt(), skillRegistry)
+	sysPrompt := skills.ComposeSystemPrompt(composeSystemPrompt(loadSystemPrompt()), skillRegistry)
 	sess := session.New()
+
 	if resumeRef != "" {
 		path, err := session.Resolve(resumeRef)
 		if err != nil {
 			return fmt.Errorf("resolve resume session: %w", err)
 		}
+
 		loaded, err := session.Load(path)
 		if err != nil {
 			return fmt.Errorf("load resume session: %w", err)
 		}
+
 		sess = loaded
 	}
 
@@ -125,12 +159,22 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 	}, sysPrompt)
 	if len(sess.Messages) > 0 {
 		ag.SetMessages(sess.Messages)
+
 		for _, msg := range sess.Messages {
 			skillActivator.MarkActivatedFromText(msg.Content)
 		}
 	}
 
-	return cli.New(ag, cfg, sess, cli.WithSkills(skillRegistry, skillActivator), cli.WithStrictPiped(strictPiped)).Run()
+	cliInst := cli.New(ag, cfg, sess,
+		cli.WithSkills(skillRegistry, skillActivator),
+		cli.WithStrictPiped(strictPiped))
+
+	err = cliInst.Run()
+	if err != nil {
+		return fmt.Errorf("cli run: %w", err)
+	}
+
+	return nil
 }
 
 func runDoctorCommand(args []string) error {
@@ -138,20 +182,31 @@ func runDoctorCommand(args []string) error {
 	flags.SetOutput(os.Stderr)
 	modelFlag := flags.String("model", "", "model name to check (defaults to resolved default_model)")
 	liveFlag := flags.Bool("live", false, "try a small live model request")
-	timeoutFlag := flags.Duration("timeout", 10*time.Second, "timeout for -live request")
-	if err := flags.Parse(args); err != nil {
+
+	timeoutFlag := flags.Duration("timeout", defaultDoctorTimeout, "timeout for -live request")
+
+	err := flags.Parse(args)
+	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+
+		return fmt.Errorf("parse doctor flags: %w", err)
 	}
+
 	if flags.NArg() > 0 {
-		return fmt.Errorf("unexpected doctor argument %q", flags.Arg(0))
+		return fmt.Errorf("%w: %q", errUnexpectedDoctorArg, flags.Arg(0))
 	}
+
 	cfg, err := loadMergedConfig()
 	if err != nil {
 		return err
 	}
+
+	if *modelFlag != "" {
+		cfg.AutoVendModel(*modelFlag)
+	}
+
 	return runDoctorReport(cfg, *modelFlag, *liveFlag, *timeoutFlag)
 }
 
@@ -164,9 +219,11 @@ func runDoctorReport(cfg *config.Config, modelName string, live bool, timeout ti
 		Timeout:   timeout,
 	})
 	doctor.Write(os.Stdout, checks)
+
 	if doctor.HasFailures(checks) {
-		return fmt.Errorf("doctor found problems")
+		return errDoctorFoundProblems
 	}
+
 	return nil
 }
 
@@ -178,25 +235,32 @@ func buildTools(cfg config.ToolConfig, skillActivator *skills.Activator) []agent
 		MaxBashOutputBytes: cfg.MaxBashOutputBytes,
 		BashTimeout:        time.Duration(cfg.BashTimeoutSeconds) * time.Second,
 	}
+
 	var out []agent.Tool
 	if !cfg.IsDisabled("read") {
 		out = append(out, builtintools.Read(opts))
 	}
+
 	if !cfg.IsDisabled("write") {
 		out = append(out, builtintools.Write(opts))
 	}
+
 	if !cfg.IsDisabled("edit") {
 		out = append(out, builtintools.Edit(opts))
 	}
+
 	if !cfg.IsDisabled("patch") {
 		out = append(out, builtintools.Patch(opts))
 	}
+
 	if !cfg.IsDisabled("bash") {
 		out = append(out, builtintools.Bash(opts))
 	}
-	if skillActivator != nil && skillActivator.Registry() != nil && len(skillActivator.Registry().ModelVisibleSkills()) > 0 {
+
+	if skillActivator != nil && len(skillActivator.Registry().ModelVisibleSkills()) > 0 {
 		out = append(out, builtintools.ActivateSkill(skillActivator))
 	}
+
 	return out
 }
 
@@ -204,17 +268,35 @@ func buildModel(name string, cfg config.Model) llm.Model {
 	return llm.Model{ID: cfg.RequestID(name), BaseURL: cfg.BaseURL}
 }
 
-// loadSystemPrompt returns the first prompt file found, preferring project-local
-// over global. Falls back to defaultSystemPrompt.
+func composeSystemPrompt(base string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+
+	var builder strings.Builder
+	builder.WriteString(strings.TrimRight(base, "\n"))
+	builder.WriteString("\n\nThe current working directory is ")
+	builder.WriteString(cwd)
+	builder.WriteString(". Prefer relative paths when creating or modifying files.")
+
+	return builder.String()
+}
+
 func loadSystemPrompt() string {
 	candidates := []string{filepath.Join(".nncode", "system_prompt.md")}
-	if home, err := os.UserHomeDir(); err == nil {
+
+	home, err := os.UserHomeDir()
+	if err == nil {
 		candidates = append(candidates, filepath.Join(home, ".nncode", "system_prompt.md"))
 	}
+
 	for _, path := range candidates {
-		if data, err := os.ReadFile(path); err == nil {
+		data, err := os.ReadFile(path)
+		if err == nil {
 			return string(data)
 		}
 	}
+
 	return defaultSystemPrompt
 }
