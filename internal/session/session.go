@@ -3,15 +3,19 @@ package session
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"nncode/internal/llm"
 )
+
+var errSessionIDRequired = errors.New("session ID or path is required")
 
 // Session stores a conversation as a JSONL file.
 type Session struct {
@@ -21,7 +25,8 @@ type Session struct {
 }
 
 func New() *Session {
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	id := strconv.FormatInt(time.Now().UnixNano(), 10)
+
 	return &Session{
 		ID:       id,
 		Messages: make([]llm.Message, 0),
@@ -32,8 +37,9 @@ func New() *Session {
 func DefaultDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("cannot get user home directory: %w", err)
 	}
+
 	return filepath.Join(home, ".nncode", "sessions"), nil
 }
 
@@ -41,18 +47,22 @@ func DefaultDir() (string, error) {
 func Resolve(ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "", fmt.Errorf("session ID or path is required")
+		return "", errSessionIDRequired
 	}
+
 	if filepath.IsAbs(ref) || strings.ContainsRune(ref, filepath.Separator) {
 		return ref, nil
 	}
+
 	if filepath.Ext(ref) == "" {
 		ref += ".jsonl"
 	}
+
 	dir, err := DefaultDir()
 	if err != nil {
 		return "", err
 	}
+
 	return filepath.Join(dir, ref), nil
 }
 
@@ -73,10 +83,12 @@ func (s *Session) Save(dir string) error {
 		if err != nil {
 			return fmt.Errorf("cannot determine home directory: %w", err)
 		}
+
 		dir = defaultDir
 	}
 
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	err := os.MkdirAll(dir, 0755)
+	if err != nil {
 		return fmt.Errorf("cannot create session directory: %w", err)
 	}
 
@@ -88,33 +100,41 @@ func (s *Session) Save(dir string) error {
 	if err != nil {
 		return fmt.Errorf("cannot create session file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	writer := bufio.NewWriter(f)
+
 	for _, msg := range s.Messages {
 		line, err := json.Marshal(msg)
 		if err != nil {
 			return fmt.Errorf("cannot marshal message: %w", err)
 		}
-		if _, err := writer.WriteString(string(line) + "\n"); err != nil {
+
+		_, err = writer.WriteString(string(line) + "\n")
+		if err != nil {
 			return fmt.Errorf("cannot write message: %w", err)
 		}
 	}
 
-	return writer.Flush()
+	err = writer.Flush()
+	if err != nil {
+		return fmt.Errorf("cannot flush session file: %w", err)
+	}
+
+	return nil
 }
 
 func Load(filePath string) (*Session, error) {
-	s := &Session{FilePath: filePath}
+	sess := &Session{FilePath: filePath}
 
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open session file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	base := filepath.Base(filePath)
-	s.ID = strings.TrimSuffix(base, filepath.Ext(base))
+	sess.ID = strings.TrimSuffix(base, filepath.Ext(base))
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
@@ -125,18 +145,20 @@ func Load(filePath string) (*Session, error) {
 		}
 
 		var msg llm.Message
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		err = json.Unmarshal([]byte(line), &msg)
+		if err != nil {
 			return nil, fmt.Errorf("cannot parse message: %w", err)
 		}
 
-		s.Messages = append(s.Messages, msg)
+		sess.Messages = append(sess.Messages, msg)
 	}
 
-	if err := scanner.Err(); err != nil {
+	err = scanner.Err()
+	if err != nil {
 		return nil, fmt.Errorf("error reading session: %w", err)
 	}
 
-	return s, nil
+	return sess, nil
 }
 
 func List() ([]string, error) {
@@ -150,10 +172,12 @@ func List() ([]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, err
+
+		return nil, fmt.Errorf("cannot read sessions directory: %w", err)
 	}
 
 	var files []string
+
 	for _, entry := range entries {
 		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".jsonl" {
 			files = append(files, filepath.Join(dir, entry.Name()))
@@ -161,5 +185,6 @@ func List() ([]string, error) {
 	}
 
 	sort.Strings(files)
+
 	return files, nil
 }

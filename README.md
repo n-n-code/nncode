@@ -36,8 +36,10 @@ go install ./cmd/nncode/
 ### Development
 
 ```bash
-go vet ./...        # static analysis
-go test ./...       # run tests
+go vet ./...                   # static analysis
+golangci-lint fmt ./...        # format imports and code
+golangci-lint run ./...        # strict lint (default: all linters)
+go test ./...                  # run tests
 go build -o nncode ./cmd/nncode/
 ```
 
@@ -77,6 +79,7 @@ In piped mode, nncode warns if the agent exits without assistant text and withou
 nncode doctor             # validate config, tools, sessions, and credentials
 nncode doctor -model llama3
 nncode doctor -model llama3 -live
+nncode doctor -timeout 30s
 nncode -check             # shorthand for non-live diagnostics
 ```
 
@@ -88,6 +91,7 @@ nncode -check             # shorthand for non-live diagnostics
 |---------|-------------|
 | `/help` | Show available commands |
 | `/quit` | Exit the agent |
+| `/exit` | Alias for `/quit` |
 | `/reset` | Reset the current session |
 | `/session` | Show current session info |
 | `/sessions` | List saved sessions |
@@ -123,6 +127,7 @@ The named model must have an entry in the `models` map (a local-server entry nee
   "models": {
     "gpt-4o": { "api_type": "openai-completions", "provider": "openai" },
     "gpt-4o-mini": { "api_type": "openai-completions", "provider": "openai" },
+    "o3": { "api_type": "openai-completions", "provider": "openai" },
     "llama3": { "api_type": "openai-completions", "provider": "ollama", "base_url": "http://127.0.0.1:8033/v1" }
   },
   "tools": {
@@ -146,11 +151,14 @@ The config map key is the name you pass to `-model`. If the server uses a differ
       "id": "<served-model-id>",
       "api_type": "openai-completions",
       "provider": "llamacpp",
-      "base_url": "http://127.0.0.1:8033/v1"
+      "base_url": "http://127.0.0.1:8033/v1",
+      "max_tokens": 4096
     }
   }
 }
 ```
+
+If you pass `-model <unknown-name>` and exactly one configured model has a non-empty `base_url`, nncode automatically clones that entry for the unknown name. This makes it convenient to use arbitrary model names with local endpoints without pre-declaring every name in config.
 
 `tools.disabled` can contain any of `read`, `write`, `edit`, `patch`, or `bash`. If `tools.workspace_root` is set, file tools are limited to that directory and `bash` runs from that directory. This is a simple guardrail, not a security sandbox.
 
@@ -159,6 +167,7 @@ The config map key is the name you pass to `-model`. If the server uses a differ
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | API key for OpenAI cloud models |
+| `NNCODE_LIVE_API_KEY` | Optional API key for live LLM smoke tests |
 
 ### System prompt
 
@@ -235,7 +244,9 @@ nncode/
 │   │   ├── write.go
 │   │   ├── edit.go
 │   │   ├── patch.go
-│   │   └── bash.go
+│   │   ├── bash.go
+│   │   ├── activate_skill.go
+│   │   └── options.go
 │   ├── session/              # JSONL persistence
 │   └── config/               # Settings loading
 └── pkg/cli/                  # CLI layer

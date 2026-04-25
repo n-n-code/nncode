@@ -8,14 +8,18 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"nncode/internal/llm"
 )
 
 const (
-	defaultMaxTurns  = 20
-	defaultMaxTokens = 4096
+	defaultMaxTurns        = 20
+	defaultMaxTokens       = 4096
+	defaultEventBufferSize = 32
 )
+
+var errMaxTurnsExceeded = errors.New("max turns exceeded")
 
 type Config struct {
 	Model       llm.Model
@@ -37,10 +41,12 @@ func New(cfg Config, systemPrompt string) *Agent {
 	if cfg.MaxTurns == 0 {
 		cfg.MaxTurns = defaultMaxTurns
 	}
+
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = defaultMaxTokens
 	}
-	return &Agent{cfg: cfg, systemPrompt: systemPrompt}
+
+	return &Agent{cfg: cfg, systemPrompt: systemPrompt, messages: nil}
 }
 
 func (a *Agent) SystemPrompt() string     { return a.systemPrompt }
@@ -52,7 +58,14 @@ func (a *Agent) Model() llm.Model         { return a.cfg.Model }
 func (a *Agent) SetModel(m llm.Model)     { a.cfg.Model = m }
 func (a *Agent) SetAPIKey(k string)       { a.cfg.APIKey = k }
 func (a *Agent) AddSystemMessage(content string) {
-	a.messages = append(a.messages, llm.Message{Role: llm.RoleSystem, Content: content})
+	a.messages = append(a.messages, llm.Message{
+		Role:       llm.RoleSystem,
+		Content:    content,
+		ToolCalls:  nil,
+		ToolCallID: "",
+		ToolName:   "",
+		Timestamp:  0,
+	})
 }
 func (a *Agent) SetMessages(m []llm.Message) {
 	a.messages = append([]llm.Message(nil), m...)
@@ -66,11 +79,21 @@ func (a *Agent) Reset() { a.messages = nil }
 // Events stream on the returned channel; the channel closes when the turn
 // ends (either naturally, on error, or on context cancellation).
 func (a *Agent) Run(ctx context.Context, userMsg string) <-chan Event {
-	a.messages = append(a.messages, llm.Message{Role: llm.RoleUser, Content: userMsg})
-	ch := make(chan Event, 32)
+	a.messages = append(a.messages, llm.Message{
+		Role:       llm.RoleUser,
+		Content:    userMsg,
+		ToolCalls:  nil,
+		ToolCallID: "",
+		ToolName:   "",
+		Timestamp:  0,
+	})
+	events := make(chan Event, defaultEventBufferSize)
+
 	go func() {
-		defer close(ch)
-		a.runLoop(ctx, ch)
+		defer close(events)
+
+		a.runLoop(ctx, events)
 	}()
-	return ch
+
+	return events
 }

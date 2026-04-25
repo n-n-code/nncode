@@ -2,7 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,13 +14,41 @@ import (
 
 const APITypeOpenAICompletions = "openai-completions"
 
-var knownToolNames = []string{"bash", "edit", "patch", "read", "write"}
+const (
+	defaultMaxReadBytes       = 50000
+	defaultMaxWriteBytes      = 1000000
+	defaultMaxBashOutputBytes = 10000
+	defaultBashTimeoutSeconds = 120
+)
+
+var (
+	errDefaultModelRequired       = errors.New("default_model is required")
+	errAtLeastOneModelRequired    = errors.New("at least one model is required")
+	errDefaultModelNotConfigured  = errors.New("default_model is not configured")
+	errModelNameEmpty             = errors.New("model name cannot be empty")
+	errUnsupportedAPIType         = errors.New("unsupported api_type")
+	errProviderRequired           = errors.New("provider is required")
+	errMaxTokensNegative          = errors.New("max_tokens cannot be negative")
+	errBaseURLRequired            = errors.New("base_url is required")
+	errBaseURLScheme              = errors.New("base_url must use http or https")
+	errBaseURLHost                = errors.New("base_url must include a host")
+	errUnknownToolDisabled        = errors.New("tools.disabled contains unknown tool")
+	errDuplicateToolDisabled      = errors.New("tools.disabled contains duplicate tool")
+	errMaxReadBytesNegative       = errors.New("tools.max_read_bytes cannot be negative")
+	errMaxWriteBytesNegative      = errors.New("tools.max_write_bytes cannot be negative")
+	errMaxBashOutputBytesNegative = errors.New("tools.max_bash_output_bytes cannot be negative")
+	errBashTimeoutNegative        = errors.New("tools.bash_timeout_seconds cannot be negative")
+)
+
+func knownToolNames() []string {
+	return []string{"bash", "edit", "patch", "read", "write"}
+}
 
 // Config holds the application configuration.
 type Config struct {
 	DefaultModel string           `json:"default_model"`
 	Models       map[string]Model `json:"models"`
-	Tools        ToolConfig       `json:"tools,omitempty"`
+	Tools        ToolConfig       `json:"tools,omitzero"`
 }
 
 // Model holds configuration for a single model.
@@ -45,7 +75,7 @@ type ToolConfig struct {
 func Load() (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot get user home directory: %w", err)
 	}
 
 	configPath := filepath.Join(home, ".nncode", "config.json")
@@ -56,14 +86,18 @@ func Load() (*Config, error) {
 		if os.IsNotExist(err) {
 			return cfg, nil
 		}
-		return nil, err
+
+		return nil, fmt.Errorf("cannot read global config file: %w", err)
 	}
 
 	var overlay Config
-	if err := json.Unmarshal(data, &overlay); err != nil {
-		return nil, err
+	err = json.Unmarshal(data, &overlay)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse global config file: %w", err)
 	}
+
 	cfg.Merge(&overlay)
+
 	return cfg, nil
 }
 
@@ -74,14 +108,16 @@ func LoadProject() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return &Config{}, nil //nolint:exhaustruct // empty config is a valid zero value
 		}
-		return nil, err
+
+		return nil, fmt.Errorf("cannot read project config file: %w", err)
 	}
 
 	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+	err = json.Unmarshal(data, &cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse project config file: %w", err)
 	}
 
 	return &cfg, nil
@@ -91,20 +127,26 @@ func LoadProject() (*Config, error) {
 func SaveGlobal(cfg *Config) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot get user home directory: %w", err)
 	}
 
 	dir := filepath.Join(home, ".nncode")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+	err = os.MkdirAll(dir, 0755)
+	if err != nil {
+		return fmt.Errorf("cannot create config directory: %w", err)
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot marshal config: %w", err)
 	}
 
-	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0644)
+	err = os.WriteFile(filepath.Join(dir, "config.json"), data, 0644)
+	if err != nil {
+		return fmt.Errorf("cannot write config file: %w", err)
+	}
+
+	return nil
 }
 
 func defaultConfig() *Config {
@@ -125,15 +167,15 @@ func defaultConfig() *Config {
 			},
 			"llama3": {
 				APIType:  APITypeOpenAICompletions,
-				Provider: "ollama",
+				Provider: "local",
 				BaseURL:  "http://127.0.0.1:8033/v1",
 			},
 		},
 		Tools: ToolConfig{
-			MaxReadBytes:       50000,
-			MaxWriteBytes:      1000000,
-			MaxBashOutputBytes: 10000,
-			BashTimeoutSeconds: 120,
+			MaxReadBytes:       defaultMaxReadBytes,
+			MaxWriteBytes:      defaultMaxWriteBytes,
+			MaxBashOutputBytes: defaultMaxBashOutputBytes,
+			BashTimeoutSeconds: defaultBashTimeoutSeconds,
 		},
 	}
 }
@@ -144,15 +186,17 @@ func (c *Config) Merge(other *Config) {
 	if other == nil {
 		return
 	}
+
 	if other.DefaultModel != "" {
 		c.DefaultModel = other.DefaultModel
 	}
+
 	if c.Models == nil {
 		c.Models = make(map[string]Model)
 	}
-	for k, v := range other.Models {
-		c.Models[k] = v
-	}
+
+	maps.Copy(c.Models, other.Models)
+
 	c.Tools.Merge(other.Tools)
 }
 
@@ -161,29 +205,76 @@ func (c *Config) ResolveModel(name string) (Model, bool) {
 	if m, ok := c.Models[name]; ok {
 		return m, true
 	}
+
 	return Model{}, false
+}
+
+// AutoVendModel adds a model entry for name by cloning the first configured
+// model that has a non-empty BaseURL. It returns true if a new entry was
+// added. This makes it convenient to use arbitrary model names with local
+// OpenAI-compatible endpoints without pre-declaring every name in config.
+func (c *Config) AutoVendModel(name string) bool {
+	if _, ok := c.Models[name]; ok {
+		return false
+	}
+
+	templateName := c.findModelTemplateName()
+	if templateName == "" {
+		return false
+	}
+
+	template := c.Models[templateName]
+	c.Models[name] = Model{
+		APIType:   template.APIType,
+		Provider:  template.Provider,
+		BaseURL:   template.BaseURL,
+		MaxTokens: template.MaxTokens,
+	}
+
+	return true
 }
 
 // Validate reports invalid configuration after all overlays have been merged.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DefaultModel) == "" {
-		return fmt.Errorf("default_model is required")
+		return errDefaultModelRequired
 	}
+
 	if len(c.Models) == 0 {
-		return fmt.Errorf("at least one model is required")
+		return errAtLeastOneModelRequired
 	}
+
 	if _, ok := c.Models[c.DefaultModel]; !ok {
-		return fmt.Errorf("default_model %q is not configured", c.DefaultModel)
+		return fmt.Errorf("default_model %q: %w", c.DefaultModel, errDefaultModelNotConfigured)
 	}
+
 	for name, model := range c.Models {
 		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("model name cannot be empty")
+			return errModelNameEmpty
 		}
-		if err := model.Validate(name); err != nil {
+
+		err := model.Validate(name)
+		if err != nil {
 			return err
 		}
 	}
+
 	return c.Tools.Validate()
+}
+
+func (c *Config) findModelTemplateName() string {
+	names := make([]string, 0, len(c.Models))
+	for name, m := range c.Models {
+		if m.BaseURL != "" {
+			names = append(names, name)
+		}
+	}
+
+	if len(names) != 1 {
+		return ""
+	}
+
+	return names[0]
 }
 
 // Validate reports unsupported model configuration values.
@@ -191,30 +282,41 @@ func (m Model) Validate(name string) error {
 	switch m.APIType {
 	case "", APITypeOpenAICompletions:
 	default:
-		return fmt.Errorf("model %q uses unsupported api_type %q (supported: %q)", name, m.APIType, APITypeOpenAICompletions)
+		return fmt.Errorf(
+			"model %q uses unsupported api_type %q (supported: %q): %w",
+			name, m.APIType, APITypeOpenAICompletions, errUnsupportedAPIType,
+		)
 	}
+
 	if strings.TrimSpace(m.Provider) == "" {
-		return fmt.Errorf("model %q provider is required", name)
+		return fmt.Errorf("model %q provider is required: %w", name, errProviderRequired)
 	}
+
 	if m.MaxTokens < 0 {
-		return fmt.Errorf("model %q max_tokens cannot be negative", name)
+		return fmt.Errorf("model %q max_tokens cannot be negative: %w", name, errMaxTokensNegative)
 	}
+
 	if m.BaseURL == "" {
 		if m.Provider != "openai" {
-			return fmt.Errorf("model %q provider %q requires base_url", name, m.Provider)
+			return fmt.Errorf("model %q provider %q requires base_url: %w", name, m.Provider, errBaseURLRequired)
 		}
+
 		return nil
 	}
-	u, err := url.Parse(m.BaseURL)
+
+	parsedURL, err := url.Parse(m.BaseURL)
 	if err != nil {
 		return fmt.Errorf("model %q base_url is invalid: %w", name, err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("model %q base_url must use http or https", name)
+
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("model %q base_url must use http or https: %w", name, errBaseURLScheme)
 	}
-	if u.Host == "" {
-		return fmt.Errorf("model %q base_url must include a host", name)
+
+	if parsedURL.Host == "" {
+		return fmt.Errorf("model %q base_url must include a host: %w", name, errBaseURLHost)
 	}
+
 	return nil
 }
 
@@ -223,6 +325,7 @@ func (m Model) RequestID(name string) string {
 	if m.ID != "" {
 		return m.ID
 	}
+
 	return name
 }
 
@@ -231,56 +334,71 @@ func (t *ToolConfig) Merge(other ToolConfig) {
 	if other.Disabled != nil {
 		t.Disabled = append([]string(nil), other.Disabled...)
 	}
+
 	if other.WorkspaceRoot != "" {
 		t.WorkspaceRoot = other.WorkspaceRoot
 	}
+
 	if other.MaxReadBytes != 0 {
 		t.MaxReadBytes = other.MaxReadBytes
 	}
+
 	if other.MaxWriteBytes != 0 {
 		t.MaxWriteBytes = other.MaxWriteBytes
 	}
+
 	if other.MaxBashOutputBytes != 0 {
 		t.MaxBashOutputBytes = other.MaxBashOutputBytes
 	}
+
 	if other.BashTimeoutSeconds != 0 {
 		t.BashTimeoutSeconds = other.BashTimeoutSeconds
 	}
 }
 
 // Validate reports invalid built-in tool configuration.
-func (t ToolConfig) Validate() error {
+func (t *ToolConfig) Validate() error {
 	seen := make(map[string]struct{}, len(t.Disabled))
+
 	for _, name := range t.Disabled {
-		if !slices.Contains(knownToolNames, name) {
-			return fmt.Errorf("tools.disabled contains unknown tool %q", name)
+		if !slices.Contains(knownToolNames(), name) {
+			return fmt.Errorf("tools.disabled contains unknown tool %q: %w", name, errUnknownToolDisabled)
 		}
+
 		if _, ok := seen[name]; ok {
-			return fmt.Errorf("tools.disabled contains duplicate tool %q", name)
+			return fmt.Errorf("tools.disabled contains duplicate tool %q: %w", name, errDuplicateToolDisabled)
 		}
+
 		seen[name] = struct{}{}
 	}
+
 	if t.MaxReadBytes < 0 {
-		return fmt.Errorf("tools.max_read_bytes cannot be negative")
+		return errMaxReadBytesNegative
 	}
+
 	if t.MaxWriteBytes < 0 {
-		return fmt.Errorf("tools.max_write_bytes cannot be negative")
+		return errMaxWriteBytesNegative
 	}
+
 	if t.MaxBashOutputBytes < 0 {
-		return fmt.Errorf("tools.max_bash_output_bytes cannot be negative")
+		return errMaxBashOutputBytesNegative
 	}
+
 	if t.BashTimeoutSeconds < 0 {
-		return fmt.Errorf("tools.bash_timeout_seconds cannot be negative")
+		return errBashTimeoutNegative
 	}
+
 	if t.WorkspaceRoot != "" {
-		if _, err := filepath.Abs(t.WorkspaceRoot); err != nil {
+		_, err := filepath.Abs(t.WorkspaceRoot)
+		if err != nil {
 			return fmt.Errorf("tools.workspace_root is invalid: %w", err)
 		}
 	}
+
 	return nil
 }
 
 // IsDisabled reports whether a named built-in tool is disabled.
-func (t ToolConfig) IsDisabled(name string) bool {
+func (t *ToolConfig) IsDisabled(name string) bool {
 	return slices.Contains(t.Disabled, name)
 }

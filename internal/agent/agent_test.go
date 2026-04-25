@@ -31,13 +31,16 @@ var _ llm.Client = (*mockClient)(nil)
 
 func (m *mockClient) Stream(ctx context.Context, req llm.Request) (<-chan llm.StreamEvent, error) {
 	m.Calls++
+
 	m.LastRequest = req
 	if m.OnStreamStart != nil {
 		m.OnStreamStart()
 	}
+
 	if m.StreamErr != nil {
 		return nil, m.StreamErr
 	}
+
 	var events []llm.StreamEvent
 	if len(m.Scripts) > 0 {
 		events = m.Scripts[0]
@@ -45,9 +48,12 @@ func (m *mockClient) Stream(ctx context.Context, req llm.Request) (<-chan llm.St
 	} else {
 		events = m.Fallback
 	}
+
 	ch := make(chan llm.StreamEvent, len(events)+1)
+
 	go func() {
 		defer close(ch)
+
 		if m.RequestBlock != nil {
 			select {
 			case <-ctx.Done():
@@ -55,6 +61,7 @@ func (m *mockClient) Stream(ctx context.Context, req llm.Request) (<-chan llm.St
 			case <-m.RequestBlock:
 			}
 		}
+
 		for _, ev := range events {
 			select {
 			case <-ctx.Done():
@@ -63,6 +70,7 @@ func (m *mockClient) Stream(ctx context.Context, req llm.Request) (<-chan llm.St
 			}
 		}
 	}()
+
 	return ch, nil
 }
 
@@ -77,6 +85,7 @@ func scriptText(text string) []llm.StreamEvent {
 // scriptToolCall returns a script with a single tool call.
 func scriptToolCall(id, name, args string) []llm.StreamEvent {
 	call := llm.ToolCall{ID: id, Name: name, Args: json.RawMessage(args)}
+
 	return []llm.StreamEvent{
 		{ToolStart: &call},
 		{ToolEnd: &call},
@@ -89,16 +98,19 @@ func drain(ch <-chan Event) []Event {
 	for e := range ch {
 		events = append(events, e)
 	}
+
 	return events
 }
 
 func findType(events []Event, t EventType) []Event {
 	var out []Event
+
 	for _, e := range events {
 		if e.Type == t {
 			out = append(out, e)
 		}
 	}
+
 	return out
 }
 
@@ -113,6 +125,7 @@ func TestAgent_TextOnly(t *testing.T) {
 	events := drain(agent.Run(context.Background(), "hi"))
 
 	assert.Equal(t, 1, mock.Calls)
+
 	texts := findType(events, EventText)
 	require.Len(t, texts, 1)
 	assert.Equal(t, "Hello!", texts[0].Text)
@@ -144,6 +157,7 @@ func TestAgent_ToolCall_ThenFinalText(t *testing.T) {
 		Parameters:  `{"type":"object"}`,
 		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
 			invoked++
+
 			return ToolResult{Content: "echoed: " + string(args)}, nil
 		},
 	}
@@ -160,7 +174,7 @@ func TestAgent_ToolCall_ThenFinalText(t *testing.T) {
 
 	ends := findType(events, EventToolCallEnd)
 	require.Len(t, ends, 1)
-	assert.Equal(t, `{"msg":"hi"}`, ends[0].ToolArgs)
+	assert.JSONEq(t, `{"msg":"hi"}`, ends[0].ToolArgs)
 
 	results := findType(events, EventToolResult)
 	require.Len(t, results, 1)
@@ -240,7 +254,9 @@ func TestAgent_MaxTurns(t *testing.T) {
 	}, "")
 
 	events := drain(agent.Run(context.Background(), "loop"))
+
 	assert.Equal(t, 3, mock.Calls)
+
 	errs := findType(events, EventError)
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0].Err.Error(), "max turns")
@@ -264,10 +280,12 @@ func TestAgent_ContextCancelStops(t *testing.T) {
 	})
 
 	done := make(chan struct{})
+
 	go func() {
 		drain(ch)
 		close(done)
 	}()
+
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -289,6 +307,7 @@ func TestAgent_SystemPromptOmittedWhenEmpty(t *testing.T) {
 	mock := &mockClient{Fallback: scriptText("x")}
 	agent := New(Config{Model: llm.Model{ID: "test"}, Client: mock}, "")
 	drain(agent.Run(context.Background(), "m"))
+
 	for _, msg := range mock.LastRequest.Messages {
 		if msg.Role == llm.RoleSystem {
 			t.Fatalf("expected no system message, got %q", msg.Content)
@@ -303,7 +322,7 @@ func TestAgent_BuildTools(t *testing.T) {
 	drain(agent.Run(context.Background(), "m"))
 	require.Len(t, mock.LastRequest.Tools, 1)
 	assert.Equal(t, "read", mock.LastRequest.Tools[0].Name)
-	assert.Equal(t, `{"type":"object"}`, mock.LastRequest.Tools[0].Parameters)
+	assert.JSONEq(t, `{"type":"object"}`, mock.LastRequest.Tools[0].Parameters)
 }
 
 func TestAgent_MultipleToolCallsInOneTurn(t *testing.T) {
@@ -326,6 +345,7 @@ func TestAgent_MultipleToolCallsInOneTurn(t *testing.T) {
 		Name: "t", Parameters: "{}",
 		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
 			n++
+
 			return ToolResult{Content: fmt.Sprintf("ok %d", n)}, nil
 		},
 	}

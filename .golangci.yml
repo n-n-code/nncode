@@ -1,0 +1,192 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: all
+  disable:
+    - wsl  # deprecated; superseded by wsl_v5
+    - wsl_v5
+    - noinlineerr  # pure style; inline error handling is standard Go idiom
+    - nlreturn     # pure style; inconsistent with wsl_v5 disable
+  settings:
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          allow:
+            - $gostd
+            - github.com/stretchr/testify
+            - nncode
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+    varnamelen:
+      ignore-names:
+        - c
+        - i
+        - j
+        - k
+        - n
+        - r
+        - t
+        - w
+        - id
+        - mu
+        - ok
+        - tt
+        - tc
+        - fn
+        - cb
+        - kv
+        - ag
+        - cfg
+        - ctx
+        - err
+        - msg
+        - out
+        - tmp
+        - sb
+        - ev
+        - sr
+        - eg
+      ignore-decls:
+        - t *testing.T
+        - b *testing.B
+        - f *os.File
+        - r *http.Request
+        - w http.ResponseWriter
+        - r io.Reader
+        - w io.Writer
+        - r *bytes.Reader
+        - w *bytes.Buffer
+    revive:
+      rules:
+        - name: package-comments
+          disabled: true
+        - name: exported
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+    cyclop:
+      max-complexity: 20
+    gocognit:
+      min-complexity: 30
+    funlen:
+      lines: 120
+      statements: 60
+    nestif:
+      min-complexity: 6
+    exhaustruct:
+      exclude:
+        - 'nncode/internal/agent\.Event'
+        - 'nncode/internal/agent\.ToolResult'
+        - 'nncode/internal/agent\.Agent'
+        - 'nncode/internal/llm\.Message'
+        - 'nncode/internal/llm\.StreamEvent'
+        - 'nncode/internal/llm\.Request'
+        - 'nncode/internal/llm\.chatRequest'
+        - 'nncode/internal/llm\.chatMessage'
+        - 'nncode/internal/llm\.chatToolCall'
+        - 'nncode/internal/llm\.partial'
+        - 'nncode/internal/llm\.streamPartial'
+        - 'nncode/internal/llm\.ToolCall'
+        - 'nncode/internal/skills\.Skill'
+        - 'nncode/internal/skills\.Diagnostic'
+        - 'nncode/internal/skills\.Catalog'
+        - 'nncode/internal/skills\.Activation'
+        - 'nncode/internal/skills\.Registry'
+        - 'nncode/internal/skills\.Activator'
+        - 'nncode/internal/skills\.DiscoverOptions'
+        - 'nncode/internal/skills\.frontmatter'
+        - 'nncode/internal/session\.Session'
+        - 'nncode/internal/config\.Model'
+        - 'nncode/internal/config\.ToolConfig'
+        - 'nncode/internal/tools\.Options'
+        - 'nncode/internal/tools\.patchFile'
+        - 'nncode/internal/tools\.patchHunk'
+        - 'nncode/pkg/cli\.CLI'
+    gosec:
+      excludes:
+        - G204
+        - G301
+        - G302
+        - G304
+        - G306
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+    mnd:
+      ignored-numbers:
+        - '0755'
+        - '0644'
+        - '1024'
+        - '8192'
+        - '65536'
+        - '500'
+        - '400'
+        - '256'
+        - '120'
+        - '10'
+        - '2'
+      ignored-functions:
+        - os.MkdirAll
+        - os.WriteFile
+        - os.Create
+        - os.CreateTemp
+        - os.OpenFile
+        - make
+        - strconv.FormatInt
+        - strconv.Atoi
+        - time.Now
+        - strings.TrimSpace
+        - filepath.Join
+        - bufio.NewScanner
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - exhaustruct
+          - err113
+          - errcheck
+          - errchkjson
+          - funlen
+          - cyclop
+          - gocognit
+          - lll
+          - mnd
+          - varnamelen
+          - wrapcheck
+          - gosec
+          - testpackage
+          - paralleltest
+          - containedctx
+          - revive
+          - dupl
+          - goconst
+          - noinlineerr
+          - prealloc
+          - unparam
+          - forcetypeassert
+          - forbidigo
+      - path: internal/tools/bash\.go
+        linters:
+          - gosec
+      - path: cmd/nncode/main\.go
+        linters:
+          - exhaustruct
+
+formatters:
+  enable:
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

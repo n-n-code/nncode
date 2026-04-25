@@ -54,7 +54,7 @@ func TestSaveAndLoad_EmptySession(t *testing.T) {
 
 	loaded, err := Load(s.FilePath)
 	require.NoError(t, err)
-	assert.Len(t, loaded.Messages, 0)
+	assert.Empty(t, loaded.Messages)
 }
 
 func TestSave_CreatesDirectory(t *testing.T) {

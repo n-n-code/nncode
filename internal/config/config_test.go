@@ -95,6 +95,7 @@ func TestSaveGlobal(t *testing.T) {
 	require.NoError(t, err)
 
 	var loaded Config
+
 	err = json.Unmarshal(data, &loaded)
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-4o", loaded.DefaultModel)
@@ -120,6 +121,56 @@ func TestResolveModel_EmptyConfig(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestAutoVendModel_AddsEntryFromTemplate(t *testing.T) {
+	cfg := defaultConfig()
+	vended := cfg.AutoVendModel("my-local-model")
+
+	require.True(t, vended)
+	m, ok := cfg.ResolveModel("my-local-model")
+	require.True(t, ok)
+	assert.Equal(t, APITypeOpenAICompletions, m.APIType)
+	assert.Equal(t, "http://127.0.0.1:8033/v1", m.BaseURL)
+	assert.Equal(t, "local", m.Provider)
+	assert.Empty(t, m.ID, "ID must be empty so RequestID falls back to the map key")
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestAutoVendModel_NoOpWhenModelExists(t *testing.T) {
+	cfg := defaultConfig()
+	vended := cfg.AutoVendModel("llama3")
+
+	assert.False(t, vended)
+	assert.Len(t, cfg.Models, 4, "no new entries should be added")
+}
+
+func TestAutoVendModel_NoOpWhenNoTemplate(t *testing.T) {
+	cfg := &Config{
+		DefaultModel: "gpt-4o",
+		Models: map[string]Model{
+			"gpt-4o": {APIType: APITypeOpenAICompletions, Provider: "openai"},
+		},
+	}
+	vended := cfg.AutoVendModel("my-local-model")
+
+	assert.False(t, vended)
+	assert.Len(t, cfg.Models, 1)
+}
+
+func TestAutoVendModel_NoOpWhenMultipleTemplates(t *testing.T) {
+	cfg := &Config{
+		DefaultModel: "gpt-4o",
+		Models: map[string]Model{
+			"gpt-4o":  {APIType: APITypeOpenAICompletions, Provider: "openai"},
+			"local-a": {APIType: APITypeOpenAICompletions, Provider: "local", BaseURL: "http://127.0.0.1:8033/v1"},
+			"local-b": {APIType: APITypeOpenAICompletions, Provider: "local", BaseURL: "http://localhost:1234/v1"},
+		},
+	}
+	vended := cfg.AutoVendModel("my-local-model")
+
+	assert.False(t, vended)
+	assert.Len(t, cfg.Models, 3)
+}
+
 func TestMerge_Overlay(t *testing.T) {
 	base := &Config{
 		DefaultModel: "gpt-4o",
@@ -131,7 +182,7 @@ func TestMerge_Overlay(t *testing.T) {
 	overlay := &Config{
 		DefaultModel: "llama3",
 		Models: map[string]Model{
-			"llama3": {APIType: APITypeOpenAICompletions, Provider: "ollama", BaseURL: "http://127.0.0.1:8033/v1"},
+			"llama3": {APIType: APITypeOpenAICompletions, Provider: "local", BaseURL: "http://127.0.0.1:8033/v1"},
 			"shared": {APIType: APITypeOpenAICompletions, Provider: "lmstudio", BaseURL: "http://localhost:1234/v1"},
 		},
 	}
@@ -152,7 +203,7 @@ func TestMerge_NilOverlay(t *testing.T) {
 
 func TestMerge_EmptyDefaultModelKeeps(t *testing.T) {
 	base := &Config{DefaultModel: "gpt-4o", Models: map[string]Model{"gpt-4o": {Provider: "openai"}}}
-	overlay := &Config{Models: map[string]Model{"llama3": {Provider: "ollama"}}}
+	overlay := &Config{Models: map[string]Model{"llama3": {Provider: "local"}}}
 
 	base.Merge(overlay)
 
@@ -200,15 +251,15 @@ func TestModelValidate_RejectsMissingProvider(t *testing.T) {
 }
 
 func TestModelValidate_RejectsLocalProviderWithoutBaseURL(t *testing.T) {
-	m := Model{APIType: APITypeOpenAICompletions, Provider: "ollama"}
-	err := m.Validate("llama3")
+	m := Model{APIType: APITypeOpenAICompletions, Provider: "local"}
+	err := m.Validate("local")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "base_url")
 }
 
 func TestModelValidate_RejectsInvalidBaseURL(t *testing.T) {
-	m := Model{APIType: APITypeOpenAICompletions, Provider: "ollama", BaseURL: "127.0.0.1:8033/v1"}
-	err := m.Validate("llama3")
+	m := Model{APIType: APITypeOpenAICompletions, Provider: "local", BaseURL: "127.0.0.1:8033/v1"}
+	err := m.Validate("local")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "base_url")
 }
@@ -237,19 +288,19 @@ func TestModelValidate_RejectsUnsupportedAPIType(t *testing.T) {
 }
 
 func TestToolConfigValidate_RejectsUnknownDisabledTool(t *testing.T) {
-	err := ToolConfig{Disabled: []string{"shell"}}.Validate()
+	err := (&ToolConfig{Disabled: []string{"shell"}}).Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown tool")
 }
 
 func TestToolConfigValidate_RejectsDuplicateDisabledTool(t *testing.T) {
-	err := ToolConfig{Disabled: []string{"bash", "bash"}}.Validate()
+	err := (&ToolConfig{Disabled: []string{"bash", "bash"}}).Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicate")
 }
 
 func TestToolConfigValidate_RejectsNegativeLimits(t *testing.T) {
-	err := ToolConfig{MaxReadBytes: -1}.Validate()
+	err := (&ToolConfig{MaxReadBytes: -1}).Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max_read_bytes")
 }

@@ -10,9 +10,13 @@ Keep the scope tight: no sub-agents, no MCP, no TUI, no permission UI. It is jus
 
 ```bash
 go vet ./...                         # Static analysis
+golangci-lint fmt ./...              # Format imports and code
+golangci-lint run ./...              # Strict lint (see .golangci.yml; default: all)
 go test ./...                        # Run tests
 go build -o nncode ./cmd/nncode/     # Build fresh repo-local binary
 ```
+
+`golangci-lint` v2 is configured in `.golangci.yml` with `linters.default: all` (every linter enabled except `wsl` and `wsl_v5`) and `goimports` enabled as the project's formatter. Install locally with the [official script](https://golangci-lint.run/docs/welcome/install/local/). `scripts/run-release-checklist.sh` runs it as part of the full checklist (and skips it gracefully if it is not on PATH).
 
 Tests use `github.com/stretchr/testify` (test-only dependency). Add or update tests for new behavior, including `cmd/nncode` and `pkg/cli` wiring when the user-facing CLI changes. No CI config yet.
 
@@ -23,9 +27,11 @@ If the default Go build cache is not writable in a sandbox, use `env GOCACHE=/tm
 Never report a task as done without running these, in order:
 
 1. `go vet ./...` — catches common mistakes the compiler misses
-2. `go test ./...` — all packages must stay green
-3. `go build -o nncode ./cmd/nncode/` — produces a fresh binary (stale binaries are a common source of "it works on my machine" confusion)
-4. Smoke-check the binary based on what you changed:
+2. `golangci-lint fmt ./...` — ensures imports and formatting are consistent
+3. `golangci-lint run ./...` — strict lint with `default: all`
+4. `go test ./...` — all packages must stay green
+5. `go build -o nncode ./cmd/nncode/` — produces a fresh binary (stale binaries are a common source of "it works on my machine" confusion)
+6. Smoke-check the binary based on what you changed:
    - Flags or startup wiring → `./nncode -h` shows expected flags, and `./nncode -badflag` exits non-zero
    - CLI/slash commands → `printf '\n' | ./nncode` exits cleanly; for interactive changes, run `./nncode` and try the affected command
    - Config or model resolution → run with `-model <name>` and confirm the request goes to the expected `base_url` (a stale binary will use the old default — rebuild first)
@@ -72,7 +78,7 @@ Agents editing user-facing behavior should know these exist:
 - `~/.nncode/system_prompt.md` and `./.nncode/system_prompt.md` override the default system prompt; project-local wins
 - `OPENAI_API_KEY` env var is the only credential source
 - Tool names that can be disabled in config: `read`, `write`, `edit`, `patch`, `bash`
-- Slash commands in interactive mode: `/help`, `/quit`, `/reset`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/prompt`
+- Slash commands in interactive mode: `/help`, `/quit`, `/exit`, `/reset`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/prompt`
 
 ## Agent Skills
 

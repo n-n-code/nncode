@@ -10,10 +10,13 @@ import (
 
 func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 	for turn := 1; turn <= a.cfg.MaxTurns; turn++ {
-		if err := ctx.Err(); err != nil {
+		err := ctx.Err()
+		if err != nil {
 			emit(ctx, out, Event{Type: EventError, Err: err})
+
 			return
 		}
+
 		if !emit(ctx, out, Event{Type: EventTurnStart, Turn: turn}) {
 			return
 		}
@@ -26,15 +29,18 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 			MaxTokens:   a.cfg.MaxTokens,
 			Temperature: a.cfg.Temperature,
 		}
+
 		streamCh, err := a.cfg.Client.Stream(ctx, req)
 		if err != nil {
 			emit(ctx, out, Event{Type: EventError, Err: fmt.Errorf("stream: %w", err)})
+
 			return
 		}
 
 		text, toolCalls, usage, streamErr := collectStream(ctx, streamCh, out)
 		if streamErr != nil {
 			emit(ctx, out, Event{Type: EventError, Err: streamErr})
+
 			return
 		}
 
@@ -50,21 +56,27 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 
 		if len(toolCalls) == 0 {
 			emit(ctx, out, Event{Type: EventDone, Usage: usage})
+
 			return
 		}
 
 		for _, tc := range toolCalls {
-			if err := ctx.Err(); err != nil {
+			err := ctx.Err()
+			if err != nil {
 				emit(ctx, out, Event{Type: EventError, Err: err})
+
 				return
 			}
+
 			result := a.executeTool(ctx, tc)
+
 			a.messages = append(a.messages, llm.Message{
 				Role:       llm.RoleTool,
 				Content:    result.Content,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 			})
+
 			if !emit(ctx, out, Event{
 				Type:     EventToolResult,
 				ToolID:   tc.ID,
@@ -77,7 +89,8 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 			}
 		}
 	}
-	emit(ctx, out, Event{Type: EventError, Err: fmt.Errorf("max turns (%d) exceeded", a.cfg.MaxTurns)})
+
+	emit(ctx, out, Event{Type: EventError, Err: fmt.Errorf("%w: %d", errMaxTurnsExceeded, a.cfg.MaxTurns)})
 }
 
 func (a *Agent) buildMessages() []llm.Message {
@@ -85,6 +98,7 @@ func (a *Agent) buildMessages() []llm.Message {
 	if a.systemPrompt != "" {
 		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: a.systemPrompt})
 	}
+
 	return append(msgs, a.messages...)
 }
 
@@ -93,6 +107,7 @@ func (a *Agent) buildTools() []llm.Tool {
 	for i, t := range a.cfg.Tools {
 		out[i] = llm.Tool{Name: t.Name, Description: t.Description, Parameters: t.Parameters}
 	}
+
 	return out
 }
 
@@ -102,6 +117,7 @@ func (a *Agent) findTool(name string) *Tool {
 			return &a.cfg.Tools[i]
 		}
 	}
+
 	return nil
 }
 
@@ -110,32 +126,43 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall) ToolResult {
 	if tool == nil {
 		return ToolResult{Content: fmt.Sprintf("Unknown tool: %q", tc.Name), IsError: true}
 	}
+
 	result, err := tool.Execute(ctx, tc.Args)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
+
 	return result
 }
 
-func collectStream(ctx context.Context, streamCh <-chan llm.StreamEvent, out chan<- Event) (string, []llm.ToolCall, llm.Usage, error) {
-	var text strings.Builder
-	var toolCalls []llm.ToolCall
-	var usage llm.Usage
+func collectStream(
+	ctx context.Context, streamCh <-chan llm.StreamEvent, out chan<- Event,
+) (string, []llm.ToolCall, llm.Usage, error) {
+	var (
+		text      strings.Builder
+		toolCalls []llm.ToolCall
+		usage     llm.Usage
+	)
+
 	for ev := range streamCh {
 		if ev.Err != nil {
 			return text.String(), toolCalls, usage, ev.Err
 		}
+
 		if ev.Text != "" {
 			text.WriteString(ev.Text)
+
 			if !emit(ctx, out, Event{Type: EventText, Text: ev.Text}) {
 				return text.String(), toolCalls, usage, ctx.Err()
 			}
 		}
+
 		if ev.ToolStart != nil {
 			if !emit(ctx, out, Event{Type: EventToolCallStart, ToolID: ev.ToolStart.ID, ToolName: ev.ToolStart.Name}) {
 				return text.String(), toolCalls, usage, ctx.Err()
 			}
 		}
+
 		if ev.ToolEnd != nil {
 			toolCalls = append(toolCalls, *ev.ToolEnd)
 			if !emit(ctx, out, Event{
@@ -147,10 +174,12 @@ func collectStream(ctx context.Context, streamCh <-chan llm.StreamEvent, out cha
 				return text.String(), toolCalls, usage, ctx.Err()
 			}
 		}
+
 		if ev.Done != nil {
 			usage = ev.Done.Usage
 		}
 	}
+
 	return text.String(), toolCalls, usage, nil
 }
 

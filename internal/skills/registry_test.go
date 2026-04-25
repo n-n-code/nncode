@@ -13,11 +13,14 @@ import (
 
 func writeSkill(t *testing.T, root string, name string, frontmatter string, body string) string {
 	t.Helper()
+
 	dir := filepath.Join(root, name)
 	require.NoError(t, os.MkdirAll(dir, 0755))
+
 	content := "---\n" + frontmatter + "---\n" + body
 	path := filepath.Join(dir, "SKILL.md")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
 	return dir
 }
 
@@ -29,6 +32,7 @@ func TestDiscoverProjectAncestorPrecedence(t *testing.T) {
 
 	rootSkills := filepath.Join(root, ".agents", "skills")
 	childSkills := filepath.Join(cwd, ".agents", "skills")
+
 	writeSkill(t, rootSkills, "go", "name: go\ndescription: root go\n", "# root")
 	childDir := writeSkill(t, childSkills, "go-local", "name: go\ndescription: child go\n", "# child")
 	writeSkill(t, rootSkills, "docs", "name: docs\ndescription: docs\n", "# docs")
@@ -39,6 +43,7 @@ func TestDiscoverProjectAncestorPrecedence(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, childDir, skill.Dir)
 	assert.Equal(t, "child go", skill.Description)
+
 	_, ok = reg.Lookup("docs")
 	assert.True(t, ok)
 	assertContainsDiagnostic(t, reg.Diagnostics(), "already defines it")
@@ -58,6 +63,7 @@ func TestDiscoverGlobalLowerPrecedence(t *testing.T) {
 	goSkill, ok := reg.Lookup("go")
 	require.True(t, ok)
 	assert.Equal(t, projectDir, goSkill.Dir)
+
 	global, ok := reg.Lookup("global-only")
 	require.True(t, ok)
 	assert.Equal(t, "global", global.Source)
@@ -179,10 +185,12 @@ func TestActivatorCanRehydrateLegacyActivationText(t *testing.T) {
 func TestActivatorCapsResourceListing(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0755))
+
 	dir := writeSkill(t, filepath.Join(root, ".agents", "skills"), "go", "name: go\ndescription: go skill\n", "# Go")
-	for i := 0; i < defaultResourceCap+2; i++ {
+	for i := range defaultResourceCap + 2 {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("resource-%02d.md", i)), []byte("x"), 0644))
 	}
+
 	reg := Discover(DiscoverOptions{CWD: root, HomeDir: t.TempDir()})
 	activator := NewActivator(reg)
 
@@ -229,10 +237,12 @@ func TestComposeSystemPromptCapsCatalogAndAddsDiagnostic(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0755))
 	skillsDir := filepath.Join(root, ".agents", "skills")
-	for i := 0; i < maxCatalogSkills+2; i++ {
+
+	for i := range maxCatalogSkills + 2 {
 		name := fmt.Sprintf("skill-%02d", i)
 		writeSkill(t, skillsDir, name, fmt.Sprintf("name: %s\ndescription: skill %d\n", name, i), "# Skill")
 	}
+
 	reg := Discover(DiscoverOptions{CWD: root, HomeDir: t.TempDir()})
 
 	prompt := ComposeSystemPrompt("base", reg)
@@ -245,10 +255,12 @@ func TestModelCatalogCapsNamesAndDiagnosticsWithoutPromptComposition(t *testing.
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, ".git"), 0755))
 	skillsDir := filepath.Join(root, ".agents", "skills")
-	for i := 0; i < maxCatalogSkills+1; i++ {
+
+	for i := range maxCatalogSkills + 1 {
 		name := fmt.Sprintf("skill-%02d", i)
 		writeSkill(t, skillsDir, name, fmt.Sprintf("name: %s\ndescription: skill %d\n", name, i), "# Skill")
 	}
+
 	reg := Discover(DiscoverOptions{CWD: root, HomeDir: t.TempDir()})
 
 	catalog := reg.ModelCatalog()
@@ -283,10 +295,12 @@ func TestReadSkillBodyRequiresExactClosingMarkerLine(t *testing.T) {
 
 func assertContainsDiagnostic(t *testing.T, diagnostics []Diagnostic, substr string) {
 	t.Helper()
+
 	for _, diag := range diagnostics {
 		if strings.Contains(diag.Message, substr) {
 			return
 		}
 	}
+
 	t.Fatalf("expected diagnostic containing %q, got %#v", substr, diagnostics)
 }
