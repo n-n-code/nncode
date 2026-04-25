@@ -4,7 +4,7 @@
 
 A minimal coding agent built in Go. Completely under your control — from system prompts to models used.
 
-Inspired by [pi-mono](https://github.com/badlogic/pi-mono), but stripped down to essentials: an agent loop, a few tools, and a CLI. No sub-agents, no MCP, no permission popups. Just prompt → LLM → tools → repeat.
+Stripped down to essentials: an agent loop, a few tools, and a CLI. No sub-agents, no MCP, no permission popups. Just prompt → LLM → tools → repeat.
 
 ## Features
 
