@@ -1,0 +1,28 @@
+# Build artifacts
+/nncode
+*.test
+coverage.out
+
+# Local nncode state
+/.nncode/
+
+# Local agent/editor tooling
+/.agents/
+/.claude/
+/.codex
+/skills-lock.json
+/opencode.json
+
+# Environment and secret material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
