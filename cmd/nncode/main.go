@@ -14,10 +14,12 @@ import (
 	"nncode/internal/config"
 	"nncode/internal/doctor"
 	"nncode/internal/llm"
+	"nncode/internal/projectctx"
 	"nncode/internal/session"
 	"nncode/internal/skills"
 	builtintools "nncode/internal/tools"
 	"nncode/pkg/cli"
+	"nncode/pkg/tui"
 )
 
 const defaultSystemPrompt = `You are a coding assistant running on the user's machine.
@@ -63,6 +65,11 @@ func runWithArgs(args []string) error {
 	strictFlag := flags.Bool("strict", false,
 		"in piped mode, exit non-zero if the agent produces no response and no successful effectful tool call")
 
+	dryRunFlag := flags.Bool("dry-run", false,
+		"preview effectful tool calls without executing them")
+
+	noTUIFlag := flags.Bool("no-tui", false, "force plain CLI even in interactive terminal mode")
+
 	err := flags.Parse(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -94,7 +101,7 @@ func runWithArgs(args []string) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	return runAgent(cfg, *modelFlag, *resumeFlag, *strictFlag)
+	return runAgent(cfg, *modelFlag, *resumeFlag, *strictFlag, *dryRunFlag, *noTUIFlag)
 }
 
 func loadMergedConfig() (*config.Config, error) {
@@ -113,7 +120,7 @@ func loadMergedConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
-func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPiped bool) error {
+func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPiped, dryRun, noTUI bool) error {
 	modelName := modelFlag
 	if modelName == "" {
 		modelName = cfg.DefaultModel
@@ -133,7 +140,9 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 
 	skillRegistry := skills.Discover(skills.DiscoverOptions{})
 	skillActivator := skills.NewActivator(skillRegistry)
-	sysPrompt := skills.ComposeSystemPrompt(composeSystemPrompt(loadSystemPrompt()), skillRegistry)
+	basePrompt := composeSystemPrompt(loadSystemPrompt())
+	basePrompt = projectctx.AppendToPrompt(basePrompt, "")
+	sysPrompt := skills.ComposeSystemPrompt(basePrompt, skillRegistry)
 	sess := session.New()
 
 	if resumeRef != "" {
@@ -156,6 +165,7 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 		APIKey:    os.Getenv("OPENAI_API_KEY"),
 		Tools:     buildTools(cfg.Tools, skillActivator),
 		MaxTokens: modelCfg.MaxTokens,
+		DryRun:    dryRun,
 	}, sysPrompt)
 	if len(sess.Messages) > 0 {
 		ag.SetMessages(sess.Messages)
@@ -163,6 +173,16 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 		for _, msg := range sess.Messages {
 			skillActivator.MarkActivatedFromText(msg.Content)
 		}
+	}
+
+	useTUI := !noTUI && stdinIsTerminal()
+	if useTUI {
+		err = tui.Run(ag, cfg, sess, skillRegistry, skillActivator)
+		if err != nil {
+			return fmt.Errorf("tui run: %w", err)
+		}
+
+		return nil
 	}
 
 	cliInst := cli.New(ag, cfg, sess,
@@ -175,6 +195,15 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 	}
 
 	return nil
+}
+
+func stdinIsTerminal() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+
+	return stat.Mode()&os.ModeCharDevice != 0
 }
 
 func runDoctorCommand(args []string) error {
@@ -255,6 +284,14 @@ func buildTools(cfg config.ToolConfig, skillActivator *skills.Activator) []agent
 
 	if !cfg.IsDisabled("bash") {
 		out = append(out, builtintools.Bash(opts))
+	}
+
+	if !cfg.IsDisabled("grep") {
+		out = append(out, builtintools.Grep(opts))
+	}
+
+	if !cfg.IsDisabled("find") {
+		out = append(out, builtintools.Find(opts))
 	}
 
 	if skillActivator != nil && len(skillActivator.Registry().ModelVisibleSkills()) > 0 {

@@ -382,3 +382,131 @@ func TestPatch_RejectsOutsideWorkspaceRoot(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content, "outside workspace root")
 }
+
+func TestGrep_ContentOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main\nfunc foo() {}\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("package main\nfunc bar() {}\n"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "func .*\\(", "path": tmpDir, "output": "content"})
+	result, err := Grep().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "a.go:2:func foo() {}")
+	assert.Contains(t, result.Content, "b.go:2:func bar() {}")
+}
+
+func TestGrep_CountOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("hello\nhello\n"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "hello", "path": tmpDir, "output": "count"})
+	result, err := Grep().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Equal(t, "2 matches", result.Content)
+}
+
+func TestGrep_FilesOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("text\n"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "package", "path": tmpDir, "output": "files"})
+	result, err := Grep().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "a.go")
+	assert.NotContains(t, result.Content, "b.txt")
+}
+
+func TestGrep_InvalidPattern(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"pattern": "[invalid", "path": "."})
+	result, err := Grep().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content, "Invalid pattern")
+}
+
+func TestGrep_NoMatches(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package main\n"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "nonexistent", "path": tmpDir})
+	result, err := Grep().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Equal(t, "No matches found", result.Content)
+}
+
+func TestGrep_WorkspaceRootRestriction(t *testing.T) {
+	tmpDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("secret\n"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "secret", "path": outside})
+	result, err := Grep(Options{RootDir: tmpDir}).Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content, "outside workspace root")
+}
+
+func TestFind_Basic(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "c.txt"), []byte("x"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "*.go", "path": tmpDir})
+	result, err := Find().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "a.go")
+	assert.Contains(t, result.Content, "b.go")
+	assert.NotContains(t, result.Content, "c.txt")
+}
+
+func TestFind_DefaultPattern(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("x"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"path": tmpDir})
+	result, err := Find().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "a.go")
+	assert.Contains(t, result.Content, "b.txt")
+}
+
+func TestFind_NoMatches(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("x"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"pattern": "*.go", "path": tmpDir})
+	result, err := Find().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Equal(t, "No files found", result.Content)
+}
+
+func TestFind_WorkspaceRootRestriction(t *testing.T) {
+	tmpDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+
+	args, _ := json.Marshal(map[string]string{"pattern": "*.txt", "path": outside})
+	result, err := Find(Options{RootDir: tmpDir}).Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Content, "outside workspace root")
+}

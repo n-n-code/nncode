@@ -10,7 +10,9 @@ Stripped down to essentials: an agent loop, a few tools, and a CLI. No sub-agent
 
 - **LLM providers**: OpenAI Chat Completions + OpenAI-compatible local servers (Ollama, LM Studio, vLLM)
 - **Agent loop**: Streaming response → tool call detection → tool execution → loop until done
-- **Built-in tools**: `read`, `write`, `edit`, `patch`, `bash`
+- **Built-in tools**: `read`, `write`, `edit`, `patch`, `bash`, `grep`, `find`
+- **Parallel reads**: Non-effectful tools run concurrently; effectful tools stay sequential
+- **Auto-context**: Detects `go.mod`, `package.json`, `Cargo.toml`, and other project files on startup and injects a compact summary into the system prompt
 - **Agent Skills**: progressive local skill discovery from `.agents/skills`
 - **Sessions**: JSONL persistence to `~/.nncode/sessions/`
 - **Config**: Global and project-local settings via JSON
@@ -59,6 +61,7 @@ NNCODE_LIVE_BASE_URL=http://127.0.0.1:8033/v1 NNCODE_LIVE_MODEL=<served-model-id
 nncode                    # use the configured default_model
 nncode -model llama3      # override the model for this invocation
 nncode -resume 123456789  # resume a saved session before chatting
+nncode -dry-run           # preview effectful tools without executing them
 > list the files in the current directory
 > read main.go and summarize it
 ```
@@ -160,7 +163,7 @@ The config map key is the name you pass to `-model`. If the server uses a differ
 
 If you pass `-model <unknown-name>` and exactly one configured model has a non-empty `base_url`, nncode automatically clones that entry for the unknown name. This makes it convenient to use arbitrary model names with local endpoints without pre-declaring every name in config.
 
-`tools.disabled` can contain any of `read`, `write`, `edit`, `patch`, or `bash`. If `tools.workspace_root` is set, file tools are limited to that directory and `bash` runs from that directory. This is a simple guardrail, not a security sandbox.
+`tools.disabled` can contain any of `read`, `write`, `edit`, `patch`, `bash`, `grep`, or `find`. If `tools.workspace_root` is set, file tools are limited to that directory and `bash` runs from that directory. This is a simple guardrail, not a security sandbox.
 
 ### Environment variables
 
@@ -238,6 +241,7 @@ nncode/
 │   │   ├── client.go         # Client interface, StreamEvent
 │   │   └── openai.go         # OpenAI provider
 │   ├── doctor/               # Setup diagnostics
+│   ├── projectctx/           # Project auto-context detection
 │   ├── skills/               # Agent Skills discovery and activation
 │   ├── tools/                # Built-in tools
 │   │   ├── read.go
@@ -245,11 +249,14 @@ nncode/
 │   │   ├── edit.go
 │   │   ├── patch.go
 │   │   ├── bash.go
+│   │   ├── grep.go
+│   │   ├── find.go
 │   │   ├── activate_skill.go
 │   │   └── options.go
 │   ├── session/              # JSONL persistence
 │   └── config/               # Settings loading
-└── pkg/cli/                  # CLI layer
+├── pkg/cli/                  # CLI layer
+└── pkg/tui/                  # Bubble Tea TUI
 ```
 
 ## License

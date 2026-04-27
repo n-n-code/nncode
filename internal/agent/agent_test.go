@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -352,4 +353,110 @@ func TestAgent_MultipleToolCallsInOneTurn(t *testing.T) {
 	agent := New(Config{Model: llm.Model{ID: "test"}, Client: mock, Tools: []Tool{tool}}, "")
 	drain(agent.Run(context.Background(), "do"))
 	assert.Equal(t, 2, n)
+}
+
+func TestAgent_ParallelReadOnlyToolCalls(t *testing.T) {
+	call1 := llm.ToolCall{ID: "c1", Name: "read", Args: json.RawMessage(`{})`)}
+	call2 := llm.ToolCall{ID: "c2", Name: "read", Args: json.RawMessage(`{})`)}
+	call3 := llm.ToolCall{ID: "c3", Name: "write", Args: json.RawMessage(`{})`)}
+
+	mock := &mockClient{
+		Scripts: [][]llm.StreamEvent{
+			{
+				{ToolStart: &call1},
+				{ToolEnd: &call1},
+				{ToolStart: &call2},
+				{ToolEnd: &call2},
+				{ToolStart: &call3},
+				{ToolEnd: &call3},
+				{Done: &llm.Done{StopReason: "tool_calls"}},
+			},
+			scriptText("done"),
+		},
+	}
+
+	var order []string
+	var mu sync.Mutex
+
+	readTool := Tool{
+		Name: "read", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			mu.Lock()
+			order = append(order, "read")
+			mu.Unlock()
+
+			return ToolResult{Content: "read ok"}, nil
+		},
+	}
+	writeTool := Tool{
+		Name: "write", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			mu.Lock()
+			order = append(order, "write")
+			mu.Unlock()
+
+			return ToolResult{Content: "write ok"}, nil
+		},
+	}
+
+	agent := New(Config{Model: llm.Model{ID: "test"}, Client: mock, Tools: []Tool{readTool, writeTool}}, "")
+	drain(agent.Run(context.Background(), "do"))
+
+	assert.Equal(t, 2, mock.Calls)
+	mu.Lock()
+	assert.Len(t, order, 3, "all three tools should execute")
+	mu.Unlock()
+
+	msgs := agent.Messages()
+	require.Len(t, msgs, 6) // user, assistant, tool1, tool2, tool3, assistant(final)
+	assert.Equal(t, llm.RoleTool, msgs[2].Role)
+	assert.Equal(t, "c1", msgs[2].ToolCallID)
+	assert.Equal(t, "read ok", msgs[2].Content)
+	assert.Equal(t, llm.RoleTool, msgs[3].Role)
+	assert.Equal(t, "c2", msgs[3].ToolCallID)
+	assert.Equal(t, "read ok", msgs[3].Content)
+	assert.Equal(t, llm.RoleTool, msgs[4].Role)
+	assert.Equal(t, "c3", msgs[4].ToolCallID)
+	assert.Equal(t, "write ok", msgs[4].Content)
+}
+
+func TestAgent_ParallelPreservesEventOrder(t *testing.T) {
+	call1 := llm.ToolCall{ID: "c1", Name: "read", Args: json.RawMessage(`{})`)}
+	call2 := llm.ToolCall{ID: "c2", Name: "write", Args: json.RawMessage(`{})`)}
+
+	mock := &mockClient{
+		Scripts: [][]llm.StreamEvent{
+			{
+				{ToolStart: &call1},
+				{ToolEnd: &call1},
+				{ToolStart: &call2},
+				{ToolEnd: &call2},
+				{Done: &llm.Done{StopReason: "tool_calls"}},
+			},
+			scriptText("done"),
+		},
+	}
+
+	readTool := Tool{
+		Name: "read", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			return ToolResult{Content: "read-result"}, nil
+		},
+	}
+	writeTool := Tool{
+		Name: "write", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			return ToolResult{Content: "write-result"}, nil
+		},
+	}
+
+	agent := New(Config{Model: llm.Model{ID: "test"}, Client: mock, Tools: []Tool{readTool, writeTool}}, "")
+	events := drain(agent.Run(context.Background(), "do"))
+
+	results := findType(events, EventToolResult)
+	require.Len(t, results, 2)
+	assert.Equal(t, "c1", results[0].ToolID)
+	assert.Equal(t, "read-result", results[0].Result)
+	assert.Equal(t, "c2", results[1].ToolID)
+	assert.Equal(t, "write-result", results[1].Result)
 }

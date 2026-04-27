@@ -4,7 +4,9 @@
 
 nncode is a minimal coding agent written in Go. It runs an agent loop: prompt -> LLM -> tool calls -> execute -> repeat. It has OpenAI-compatible model support, JSONL sessions, local Agent Skills, and a small synchronous tool set.
 
-Keep the scope tight: no sub-agents, no MCP, no TUI, no permission UI. It is just a CLI that streams responses to stdout.
+Keep the scope tight: no sub-agents, no MCP, no permission UI. It is a CLI that streams responses to stdout, with an optional Bubble Tea TUI for interactive terminal sessions.
+
+> **Design reference:** For visual identity, color system, typography, and CRT styling rules, see [`DESIGN.md`](DESIGN.md). Agents working on TUI, branding, or terminal visuals should read it before making changes.
 
 ## Build & test
 
@@ -50,11 +52,13 @@ internal/       # Private packages
   agent/        # Agent loop, state, tools, events (agent.go, loop.go, event.go, tool.go)
   doctor/       # Setup diagnostics used by `nncode doctor` and `nncode -check`
   llm/          # LLM abstraction — Client interface + OpenAI-compatible provider (client.go, openai.go)
+  projectctx/   # Auto-detects project files and injects a compact summary into the system prompt
   skills/       # Agent Skills discovery, prompt catalog, activation, diagnostics
-  tools/        # Built-in tools: read, write, edit, patch, bash, activate_skill
+  tools/        # Built-in tools: read, write, edit, patch, bash, grep, find, activate_skill
   session/      # JSONL session persistence
   config/       # Settings loading (global + project-local, merged onto defaults)
 pkg/cli/        # CLI layer — interactive + piped-stdin modes, slash commands
+pkg/tui/        # Bubble Tea TUI — interactive terminal sessions with overlays
 ```
 
 ## Coding conventions
@@ -77,7 +81,8 @@ Agents editing user-facing behavior should know these exist:
 - `~/.nncode/config.json` (global) and `./.nncode/config.json` (project-local) overlay built-in defaults; partial configs work
 - `~/.nncode/system_prompt.md` and `./.nncode/system_prompt.md` override the default system prompt; project-local wins
 - `OPENAI_API_KEY` env var is the only credential source
-- Tool names that can be disabled in config: `read`, `write`, `edit`, `patch`, `bash`
+- Tool names that can be disabled in config: `read`, `write`, `edit`, `patch`, `bash`, `grep`, `find`
+- `-dry-run` previews effectful tool calls (`write`, `edit`, `patch`, `bash`) without executing them; `read`, `grep`, `find`, and `activate_skill` still run normally
 - Slash commands in interactive mode: `/help`, `/quit`, `/exit`, `/reset`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/prompt`
 
 ## Agent Skills
@@ -119,17 +124,20 @@ When using nncode itself as the patch author:
 
 ## Architecture notes
 
-- The agent loop (`internal/agent/loop.go`) is the core: it calls the LLM, parses tool calls from the stream, executes tools in order, feeds results back as `llm.RoleTool` messages, and repeats until no tool calls remain or `MaxTurns` is hit
+- The agent loop (`internal/agent/loop.go`) is the core: it calls the LLM, parses tool calls from the stream, executes tools, feeds results back as `llm.RoleTool` messages, and repeats until no tool calls remain or `MaxTurns` is hit
 - The agent owns the conversation history; the CLI aliases `sess.Messages = agent.Messages()` after each turn and saves once on exit
+- Non-effectful tools (`read`, `grep`, `find`, `activate_skill`) execute in parallel within a turn; effectful tools (`write`, `edit`, `patch`, `bash`) execute sequentially in their original order
 - Tools are synchronous — they block the loop until they return
 - Sessions are JSONL files in `~/.nncode/sessions/`; there's no undo or branching
-- The CLI is synchronous and blocking — no async event queue, no TUI
+- The CLI is synchronous and blocking — no async event queue
 - Config resolution: built-in `defaultConfig()` → `~/.nncode/config.json` → `./.nncode/config.json` → `-model` flag, merged left-to-right (`Config.Merge` does the overlay)
 - Skills are discovered at startup and composed into the system prompt before the agent is created; resumed sessions also mark previously activated skills from structured markers in message content
+- Auto-context injection: on startup, `projectctx.Gather` detects common project files (`go.mod`, `package.json`, `Cargo.toml`, etc.) in the working directory and appends a compact `<project_context>` block to the system prompt so the model knows the project type before the first turn
 
 ## Boundaries
 
 - Do not add runtime dependencies without asking
-- Do not add a TUI — the CLI is intentionally simple (stdin/stdout only)
+- The TUI lives in `pkg/tui/` and is the default for interactive terminal sessions; use `-no-tui` to force the plain CLI
+- TUI mid-turn cancellation: when the agent is running, `ctrl+c` cancels the current turn instead of quitting; a second `ctrl+c` while idle exits the app
 - Do not add MCP, sub-agents, or plan mode — those are explicitly out of scope
 - Do not modify `internal/llm/openai.go` to support non-OpenAI-compatible APIs — use a new provider instead
