@@ -29,6 +29,7 @@ type Config struct {
 	MaxTurns    int
 	MaxTokens   int
 	Temperature float64
+	DryRun      bool
 }
 
 type Agent struct {

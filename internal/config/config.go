@@ -41,7 +41,7 @@ var (
 )
 
 func knownToolNames() []string {
-	return []string{"bash", "edit", "patch", "read", "write"}
+	return []string{"bash", "edit", "find", "grep", "patch", "read", "write"}
 }
 
 // Config holds the application configuration.

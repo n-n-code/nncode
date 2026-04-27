@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"nncode/internal/llm"
 )
@@ -60,19 +61,46 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 			return
 		}
 
-		for _, tc := range toolCalls {
-			err := ctx.Err()
-			if err != nil {
-				emit(ctx, out, Event{Type: EventError, Err: err})
+		results := make([]ToolResult, len(toolCalls))
 
-				return
+		// Execute non-effectful tools in parallel.
+		var waitGroup sync.WaitGroup
+
+		for i, tc := range toolCalls {
+			if isEffectfulTool(tc.Name) {
+				continue
 			}
 
-			result := a.executeTool(ctx, tc)
+			waitGroup.Add(1)
 
+			go func(idx int, call llm.ToolCall) {
+				defer waitGroup.Done()
+				results[idx] = a.executeTool(ctx, call)
+			}(i, tc)
+		}
+
+		waitGroup.Wait()
+
+		if err := ctx.Err(); err != nil {
+			emit(ctx, out, Event{Type: EventError, Err: err})
+
+			return
+		}
+
+		// Execute effectful tools sequentially in original order.
+		for i, tc := range toolCalls {
+			if !isEffectfulTool(tc.Name) {
+				continue
+			}
+
+			results[i] = a.executeTool(ctx, tc)
+		}
+
+		// Emit results and append messages in original order.
+		for i, tc := range toolCalls {
 			a.messages = append(a.messages, llm.Message{
 				Role:       llm.RoleTool,
-				Content:    result.Content,
+				Content:    results[i].Content,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 			})
@@ -81,9 +109,9 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 				Type:     EventToolResult,
 				ToolID:   tc.ID,
 				ToolName: tc.Name,
-				Result:   result.Content,
-				IsError:  result.IsError,
-				Metadata: result.Metadata,
+				Result:   results[i].Content,
+				IsError:  results[i].IsError,
+				Metadata: results[i].Metadata,
 			}) {
 				return
 			}
@@ -127,12 +155,31 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall) ToolResult {
 		return ToolResult{Content: fmt.Sprintf("Unknown tool: %q", tc.Name), IsError: true}
 	}
 
+	if a.cfg.DryRun && isEffectfulTool(tc.Name) {
+		return ToolResult{
+			Content: fmt.Sprintf("[dry-run] Would execute %s with args: %s", tc.Name, string(tc.Args)),
+			Metadata: map[string]any{
+				"dry_run": true,
+				"tool":    tc.Name,
+			},
+		}
+	}
+
 	result, err := tool.Execute(ctx, tc.Args)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
 
 	return result
+}
+
+func isEffectfulTool(name string) bool {
+	switch name {
+	case "write", "edit", "patch", "bash":
+		return true
+	default:
+		return false
+	}
 }
 
 func collectStream(
