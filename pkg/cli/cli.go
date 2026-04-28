@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"nncode/internal/agent"
+	"nncode/internal/agentloop"
 	"nncode/internal/config"
 	"nncode/internal/session"
 	"nncode/internal/skills"
@@ -31,6 +32,7 @@ type CLI struct {
 	skillRegistry   *skills.Registry
 	skillActivator  *skills.Activator
 	strictPiped     bool
+	loopRef         string
 }
 
 type Option func(*CLI)
@@ -51,6 +53,12 @@ func WithIO(in io.Reader, out io.Writer, errOut io.Writer, inputIsTerminal bool)
 func WithStrictPiped(strict bool) Option {
 	return func(c *CLI) {
 		c.strictPiped = strict
+	}
+}
+
+func WithLoopRef(ref string) Option {
+	return func(c *CLI) {
+		c.loopRef = ref
 	}
 }
 
@@ -136,7 +144,13 @@ func (c *CLI) runPiped(ctx context.Context) error {
 		return nil
 	}
 
-	outcome := c.runPrompt(ctx, prompt)
+	var outcome promptOutcome
+	if c.loopRef != "" {
+		outcome = c.runLoop(ctx, c.loopRef, prompt)
+	} else {
+		outcome = c.runPrompt(ctx, prompt)
+	}
+
 	c.saveSession()
 
 	if outcome.Err != nil {
@@ -225,6 +239,9 @@ func (c *CLI) handleCommand(ctx context.Context, line string) bool {
 		fmt.Fprintln(c.out, "  /tools             List available tools")
 		fmt.Fprintln(c.out, "  /skills            List discovered Agent Skills")
 		fmt.Fprintln(c.out, "  /skill:name [msg]  Activate an Agent Skill, optionally then run msg")
+		fmt.Fprintln(c.out, "  /loops             Browse configured Agent Loops")
+		fmt.Fprintln(c.out, "  /loop <name> [msg] Run an Agent Loop, optionally with msg")
+		fmt.Fprintln(c.out, "  /loop-validate <name|path>")
 		fmt.Fprintln(c.out, "  /prompt            Show the current system prompt")
 	case "/reset":
 		c.agent.Reset()
@@ -252,6 +269,12 @@ func (c *CLI) handleCommand(ctx context.Context, line string) bool {
 		}
 	case "/skills":
 		c.listSkills()
+	case "/loops":
+		c.listLoops()
+	case "/loop":
+		c.runLoopCommand(ctx, line)
+	case "/loop-validate":
+		c.validateLoopCommand(fields)
 	case "/prompt":
 		fmt.Fprintln(c.out, c.agent.SystemPrompt())
 	default:
@@ -292,6 +315,46 @@ func (c *CLI) listSkills() {
 
 		fmt.Fprintf(c.out, "  [%s] %s: %s\n", diag.Level, diag.Path, diag.Message)
 	}
+}
+
+func (c *CLI) listLoops() {
+	summaries, err := agentloop.List(agentloop.StoreOptions{})
+	if err != nil {
+		fmt.Fprintf(c.errOut, "warning: failed to list Agent Loops: %v\n", err)
+
+		return
+	}
+
+	agentloop.WriteSummaries(c.out, summaries, 120)
+}
+
+func (c *CLI) runLoopCommand(ctx context.Context, line string) {
+	rest := strings.TrimSpace(strings.TrimPrefix(line, "/loop"))
+	if rest == "" {
+		fmt.Fprintln(c.out, "Usage: /loop <name|path> [message]")
+
+		return
+	}
+
+	ref, prompt, _ := strings.Cut(rest, " ")
+	_ = c.runLoop(ctx, ref, strings.TrimSpace(prompt))
+}
+
+func (c *CLI) validateLoopCommand(fields []string) {
+	if len(fields) != 2 {
+		fmt.Fprintln(c.out, "Usage: /loop-validate <name|path>")
+
+		return
+	}
+
+	summary, err := agentloop.Validate(fields[1], agentloop.StoreOptions{})
+	if err != nil {
+		fmt.Fprintf(c.out, "Agent Loop invalid: %v\n", err)
+
+		return
+	}
+
+	fmt.Fprintf(c.out, "Agent Loop %q is valid (%s).\n", summary.Ref, summary.Path)
 }
 
 func (c *CLI) activateSkillCommand(ctx context.Context, line string) {
@@ -413,9 +476,33 @@ func (o *promptOutcome) Incomplete() bool {
 }
 
 func (c *CLI) runPrompt(ctx context.Context, prompt string) promptOutcome {
+	events := c.agent.Run(ctx, prompt)
+	return c.runEvents(events)
+}
+
+func (c *CLI) runLoop(ctx context.Context, ref string, prompt string) promptOutcome {
+	runner := agentloop.Runner{
+		Agent:        c.agent,
+		Config:       c.cfg,
+		StoreOptions: agentloop.StoreOptions{},
+	}
+
+	events, err := runner.Run(ctx, ref, prompt)
+	if err != nil {
+		fmt.Fprintf(c.errOut, "\n[error] %v\n", err)
+
+		var outcome promptOutcome
+		outcome.Err = err
+
+		return outcome
+	}
+
+	return c.runEvents(events)
+}
+
+func (c *CLI) runEvents(events <-chan agent.Event) promptOutcome {
 	var outcome promptOutcome
 
-	events := c.agent.Run(ctx, prompt)
 	for ev := range events {
 		switch ev.Type {
 		case agent.EventText:
@@ -451,6 +538,12 @@ func (c *CLI) runPrompt(ctx context.Context, prompt string) promptOutcome {
 			// no-op
 		case agent.EventTurnEnd:
 			// no-op
+		case agent.EventLoopStart,
+			agent.EventLoopIterationStart,
+			agent.EventLoopNodeStart,
+			agent.EventLoopNodeEnd,
+			agent.EventLoopExitDecision:
+			c.renderLoopEvent(ev)
 		case agent.EventError:
 			if outcome.Err == nil {
 				outcome.Err = ev.Err
@@ -467,13 +560,22 @@ func (c *CLI) runPrompt(ctx context.Context, prompt string) promptOutcome {
 	return outcome
 }
 
+func (c *CLI) renderLoopEvent(ev agent.Event) {
+	text := ev.LoopText()
+	if text == "" {
+		return
+	}
+
+	fmt.Fprintf(c.out, "\033[2m%s\033[0m\n", text)
+}
+
 func isEffectfulToolResult(name string, metadata map[string]any) bool {
 	switch name {
 	case "write", "edit":
 		return true
 	case "patch":
 		return metadataInt(metadata, "files_changed") > 0
-	case "bash":
+	case "bash", "cmd":
 		return metadataInt(metadata, "exit_code") == 0
 	default:
 		return false

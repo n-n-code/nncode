@@ -1,6 +1,10 @@
 package agent
 
-import "nncode/internal/llm"
+import (
+	"fmt"
+
+	"nncode/internal/llm"
+)
 
 type EventType int
 
@@ -11,6 +15,11 @@ const (
 	EventToolResult
 	EventTurnStart
 	EventTurnEnd
+	EventLoopStart
+	EventLoopIterationStart
+	EventLoopNodeStart
+	EventLoopNodeEnd
+	EventLoopExitDecision
 	EventError
 	EventDone
 )
@@ -29,6 +38,16 @@ func (t EventType) String() string {
 		return "turn_start"
 	case EventTurnEnd:
 		return "turn_end"
+	case EventLoopStart:
+		return "loop_start"
+	case EventLoopIterationStart:
+		return "loop_iteration_start"
+	case EventLoopNodeStart:
+		return "loop_node_start"
+	case EventLoopNodeEnd:
+		return "loop_node_end"
+	case EventLoopExitDecision:
+		return "loop_exit_decision"
 	case EventError:
 		return "error"
 	case EventDone:
@@ -51,4 +70,39 @@ type Event struct {
 	Err      error // EventError
 	Turn     int   // EventTurn*
 	Usage    llm.Usage
+
+	LoopName            string // EventLoop*
+	LoopPath            string // EventLoopStart
+	LoopIteration       int    // EventLoopIterationStart, EventLoopExitDecision
+	LoopNodeID          string // EventLoopNode*
+	LoopNodeType        string // EventLoopNode*
+	LoopExit            bool   // EventLoopExitDecision
+	LoopExitMarkerFound bool   // EventLoopExitDecision
+}
+
+// LoopText renders the loop lifecycle event as a single status line, or "" if
+// the event is not a loop event the user surfaces (CLI dim line / TUI status).
+func (e Event) LoopText() string {
+	//nolint:exhaustive // Only loop-lifecycle events render as status; others return "".
+	switch e.Type {
+	case EventLoopStart:
+		return "loop " + e.LoopName
+	case EventLoopIterationStart:
+		return fmt.Sprintf("iteration %d", e.LoopIteration)
+	case EventLoopNodeStart:
+		return fmt.Sprintf("node %s (%s)", e.LoopNodeID, e.LoopNodeType)
+	case EventLoopExitDecision:
+		decision := "continue"
+		if e.LoopExit {
+			decision = "exit"
+		}
+
+		if !e.LoopExitMarkerFound {
+			return "exit criteria: " + decision + " (marker missing)"
+		}
+
+		return "exit criteria: " + decision
+	default:
+		return ""
+	}
 }

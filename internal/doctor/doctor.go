@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"nncode/internal/agentloop"
 	"nncode/internal/config"
 	"nncode/internal/llm"
 	"nncode/internal/session"
@@ -91,6 +92,7 @@ func Run(ctx context.Context, opts Options) []Check {
 	checks = append(checks, checkAPIKey(modelName, modelCfg, modelOK, opts.APIKey))
 	checks = append(checks, checkTools(cfg.Tools)...)
 	checks = append(checks, checkSkills(opts.Skills))
+	checks = append(checks, checkLoops())
 	checks = append(checks, checkSessionDir())
 
 	if opts.Live {
@@ -100,6 +102,34 @@ func Run(ctx context.Context, opts Options) []Check {
 	}
 
 	return checks
+}
+
+func checkLoops() Check {
+	summaries, err := agentloop.List(agentloop.StoreOptions{})
+	if err != nil {
+		return fail("loops", err.Error())
+	}
+
+	if len(summaries) == 0 {
+		return ok("loops", "no Agent Loops configured")
+	}
+
+	invalid := 0
+	for _, summary := range summaries {
+		if summary.Err != nil {
+			invalid++
+		}
+	}
+
+	if invalid > 0 {
+		return warn("loops", fmt.Sprintf(
+			"%d configured; %d invalid; run /loops or nncode loop list for details",
+			len(summaries),
+			invalid,
+		))
+	}
+
+	return ok("loops", fmt.Sprintf("%d configured and valid", len(summaries)))
 }
 
 func checkAPIKey(modelName string, modelCfg config.Model, modelOK bool, apiKey string) Check {

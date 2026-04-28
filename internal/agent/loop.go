@@ -9,7 +9,10 @@ import (
 	"nncode/internal/llm"
 )
 
-func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
+func (a *Agent) runLoop(ctx context.Context, out chan<- Event, opts RunOptions) {
+	model, maxTokens := a.requestOverrides(opts)
+	tools := a.buildTools()
+
 	for turn := 1; turn <= a.cfg.MaxTurns; turn++ {
 		err := ctx.Err()
 		if err != nil {
@@ -23,11 +26,11 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 		}
 
 		req := llm.Request{
-			Model:       a.cfg.Model,
-			Messages:    a.buildMessages(),
-			Tools:       a.buildTools(),
+			Model:       model,
+			Messages:    a.buildMessages(opts),
+			Tools:       tools,
 			APIKey:      a.cfg.APIKey,
-			MaxTokens:   a.cfg.MaxTokens,
+			MaxTokens:   maxTokens,
 			Temperature: a.cfg.Temperature,
 		}
 
@@ -121,10 +124,28 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event) {
 	emit(ctx, out, Event{Type: EventError, Err: fmt.Errorf("%w: %d", errMaxTurnsExceeded, a.cfg.MaxTurns)})
 }
 
-func (a *Agent) buildMessages() []llm.Message {
-	msgs := make([]llm.Message, 0, len(a.messages)+1)
+func (a *Agent) requestOverrides(opts RunOptions) (llm.Model, int) {
+	model := a.cfg.Model
+	if opts.Model.ID != "" {
+		model = opts.Model
+	}
+
+	maxTokens := a.cfg.MaxTokens
+	if opts.MaxTokens != 0 {
+		maxTokens = opts.MaxTokens
+	}
+
+	return model, maxTokens
+}
+
+func (a *Agent) buildMessages(opts RunOptions) []llm.Message {
+	msgs := make([]llm.Message, 0, len(a.messages)+1+len(opts.ScopedSystemMessages))
 	if a.systemPrompt != "" {
 		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: a.systemPrompt})
+	}
+
+	for _, content := range opts.ScopedSystemMessages {
+		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: content})
 	}
 
 	return append(msgs, a.messages...)

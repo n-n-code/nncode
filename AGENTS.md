@@ -50,6 +50,7 @@ Build/test passing is necessary but not sufficient — if you can't actually run
 cmd/nncode/     # Entry point — flag parsing, wiring
 internal/       # Private packages
   agent/        # Agent loop, state, tools, events (agent.go, loop.go, event.go, tool.go)
+  agentloop/    # User-defined Agent Loop loading and orchestration
   doctor/       # Setup diagnostics used by `nncode doctor` and `nncode -check`
   llm/          # LLM abstraction — Client interface + OpenAI-compatible provider (client.go, openai.go)
   projectctx/   # Auto-detects project files and injects a compact summary into the system prompt
@@ -76,14 +77,17 @@ Agents editing user-facing behavior should know these exist:
 
 - `-model <name>` flag overrides `default_model` for a single run
 - `-resume <id|path>` loads a saved session before the first prompt
+- `-loop <name|path>` runs a configured Agent Loop in piped mode
+- `-loop-check <name|path>` validates a configured Agent Loop and exits without a model request
+- `nncode loop list|check|run` exposes Agent Loop list, validation, and piped-run workflows for scripts
 - `-strict` only affects piped mode; it returns non-zero for incomplete turns with no assistant response and no successful effectful tool call
-- `-check` runs local setup diagnostics; `nncode doctor [-model <name>] [-live] [-timeout <duration>]` is the fuller diagnostics command
+- `-check` runs local setup diagnostics; `nncode doctor [-model <name>] [-live] [-timeout <duration>]` is the fuller diagnostics command and warns on invalid configured Agent Loops
 - `~/.nncode/config.json` (global) and `./.nncode/config.json` (project-local) overlay built-in defaults; partial configs work
 - `~/.nncode/system_prompt.md` and `./.nncode/system_prompt.md` override the default system prompt; project-local wins
 - `OPENAI_API_KEY` env var is the only credential source
 - Tool names that can be disabled in config: `read`, `write`, `edit`, `patch`, `bash`, `grep`, `find`
-- `-dry-run` previews effectful tool calls (`write`, `edit`, `patch`, `bash`) without executing them; `read`, `grep`, `find`, and `activate_skill` still run normally
-- Slash commands in interactive mode: `/help`, `/quit`, `/exit`, `/reset`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/prompt`
+- `-dry-run` previews effectful tool calls (`write`, `edit`, `patch`, `bash`) and Agent Loop `cmd` nodes without executing them; `read`, `grep`, `find`, and `activate_skill` still run normally
+- Slash commands in interactive mode: `/help`, `/quit`, `/exit`, `/reset`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/loops`, `/loop`, `/loop-validate`, `/prompt`
 
 ## Agent Skills
 
@@ -126,6 +130,9 @@ When using nncode itself as the patch author:
 
 - The agent loop (`internal/agent/loop.go`) is the core: it calls the LLM, parses tool calls from the stream, executes tools, feeds results back as `llm.RoleTool` messages, and repeats until no tool calls remain or `MaxTurns` is hit
 - The agent owns the conversation history; the CLI aliases `sess.Messages = agent.Messages()` after each turn and saves once on exit
+- User-defined Agent Loops live in strict versioned JSON files under `./.nncode/loops` and `~/.nncode/loops`; project-local loops win by filename, `/loops` and `nncode loop list` show runnable refs, and the loop runner orchestrates repeated `Agent.RunWithOptions` calls with scoped loop system messages and lifecycle events
+- Agent Loop v1 files require `schema_version: 1`; node types are `entry_prompt`, `prompt`, `cmd`, `exit_criteria`, and `exit_prompt`. The durable authoring spec is `docs/agent-loops-v1.md`, with a machine-readable schema at `docs/agent-loops-v1.schema.json`.
+- Agent Loop `cmd` nodes execute `content` through bash, use the configured tool workspace root, timeout, and output limits, and default to aborting on failure unless `settings.on_error` is `"continue"`. Disabling the `bash` tool also disables `cmd` node execution.
 - Non-effectful tools (`read`, `grep`, `find`, `activate_skill`) execute in parallel within a turn; effectful tools (`write`, `edit`, `patch`, `bash`) execute sequentially in their original order
 - Tools are synchronous — they block the loop until they return
 - Sessions are JSONL files in `~/.nncode/sessions/`; there's no undo or branching

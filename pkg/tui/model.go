@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"nncode/internal/agent"
+	"nncode/internal/agentloop"
 	"nncode/internal/config"
 	"nncode/internal/session"
 	"nncode/internal/skills"
@@ -46,6 +47,7 @@ const (
 	overlaySessions
 	overlaySkills
 	overlayTools
+	overlayLoops
 	overlayPrompt
 	overlaySessionInfo
 )
@@ -73,9 +75,10 @@ type model struct {
 	height int
 
 	// Overlay state.
-	overlay      overlayKind
-	overlayItems []string
-	overlayIndex int
+	overlay       overlayKind
+	overlayItems  []string
+	overlayIndex  int
+	loopSummaries []agentloop.Summary
 
 	// Streaming state.
 	eventCh <-chan agent.Event

@@ -130,6 +130,12 @@ func TestToolResultHasContinuousBackground(t *testing.T) {
 	assertContiguousBackground(t, "toolResult", rendered)
 }
 
+func TestLoopStatusHasContinuousBackground(t *testing.T) {
+	setupTrueColor(t)
+	rendered := renderLoopStatus("node implement (prompt)", 78)
+	assertContiguousBackground(t, "loopStatus", rendered)
+}
+
 func TestFullViewBodyHasContinuousBackground(t *testing.T) {
 	setupTrueColor(t)
 	m := newTestModel(&mockClient{})

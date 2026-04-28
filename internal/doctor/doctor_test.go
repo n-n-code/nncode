@@ -76,9 +76,29 @@ func TestRun_OKWithoutLive(t *testing.T) {
 	assert.Equal(t, StatusOK, find(checks, "model").Status)
 	assert.Equal(t, StatusOK, find(checks, "tools").Status)
 	assert.Equal(t, StatusOK, find(checks, "skills").Status)
+	assert.Equal(t, StatusOK, find(checks, "loops").Status)
 	assert.Equal(t, StatusOK, find(checks, "sessions").Status)
 	assert.Equal(t, StatusWarn, find(checks, "live request").Status)
 	assert.False(t, HasFailures(checks))
+}
+
+func TestRun_WarnsOnInvalidAgentLoop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	require.NoError(t, os.MkdirAll(filepath.Join(".nncode", "loops"), 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(".nncode", "loops", "bad.json"),
+		[]byte(`{"name":"bad","nodes":[]}`),
+		0644,
+	))
+
+	checks := Run(context.Background(), Options{Config: testConfig()})
+
+	loopCheck := find(checks, "loops")
+	assert.Equal(t, StatusWarn, loopCheck.Status)
+	assert.Contains(t, loopCheck.Detail, "invalid")
+	assert.False(t, HasFailures(checks), "invalid loops should warn without failing doctor")
 }
 
 func TestRun_WarnsOnSkillDiagnostics(t *testing.T) {

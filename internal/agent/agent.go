@@ -9,13 +9,14 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"nncode/internal/llm"
 )
 
 const (
-	defaultMaxTurns        = 20
-	defaultMaxTokens       = 4096
+	defaultMaxTurns        = 200
+	defaultMaxTokens       = 65536
 	defaultEventBufferSize = 32
 )
 
@@ -30,6 +31,14 @@ type Config struct {
 	MaxTokens   int
 	Temperature float64
 	DryRun      bool
+}
+
+// RunOptions applies to one RunWithOptions call without changing the agent's
+// stored configuration.
+type RunOptions struct {
+	Model                llm.Model
+	MaxTokens            int
+	ScopedSystemMessages []string
 }
 
 type Agent struct {
@@ -58,16 +67,18 @@ func (a *Agent) SetTools(t []Tool)        { a.cfg.Tools = t }
 func (a *Agent) Model() llm.Model         { return a.cfg.Model }
 func (a *Agent) SetModel(m llm.Model)     { a.cfg.Model = m }
 func (a *Agent) SetAPIKey(k string)       { a.cfg.APIKey = k }
+func (a *Agent) DryRun() bool             { return a.cfg.DryRun }
 func (a *Agent) AddSystemMessage(content string) {
-	a.messages = append(a.messages, llm.Message{
-		Role:       llm.RoleSystem,
-		Content:    content,
-		ToolCalls:  nil,
-		ToolCallID: "",
-		ToolName:   "",
-		Timestamp:  0,
-	})
+	a.addMessage(llm.RoleSystem, content)
 }
+
+// AddObservationMessage appends non-user runtime context to history. Chat APIs
+// do not have a portable observation role, so observations are stored as
+// user-compatible messages while keeping call sites semantically explicit.
+func (a *Agent) AddObservationMessage(content string) {
+	a.addMessage(llm.RoleUser, content)
+}
+
 func (a *Agent) SetMessages(m []llm.Message) {
 	a.messages = append([]llm.Message(nil), m...)
 }
@@ -76,10 +87,13 @@ func (a *Agent) SetMessages(m []llm.Message) {
 // is preserved.
 func (a *Agent) Reset() { a.messages = nil }
 
-// Run appends the user message to history and starts the loop in a goroutine.
-// Events stream on the returned channel; the channel closes when the turn
-// ends (either naturally, on error, or on context cancellation).
 func (a *Agent) Run(ctx context.Context, userMsg string) <-chan Event {
+	return a.RunWithOptions(ctx, userMsg, RunOptions{})
+}
+
+// RunWithOptions appends the user message to history and starts the loop in a
+// goroutine, applying scoped request overrides for this single prompt turn.
+func (a *Agent) RunWithOptions(ctx context.Context, userMsg string, opts RunOptions) <-chan Event {
 	a.messages = append(a.messages, llm.Message{
 		Role:       llm.RoleUser,
 		Content:    userMsg,
@@ -88,13 +102,37 @@ func (a *Agent) Run(ctx context.Context, userMsg string) <-chan Event {
 		ToolName:   "",
 		Timestamp:  0,
 	})
+
+	opts.ScopedSystemMessages = nonBlankStrings(opts.ScopedSystemMessages)
 	events := make(chan Event, defaultEventBufferSize)
 
 	go func() {
 		defer close(events)
 
-		a.runLoop(ctx, events)
+		a.runLoop(ctx, events, opts)
 	}()
 
 	return events
+}
+
+func (a *Agent) addMessage(role llm.Role, content string) {
+	a.messages = append(a.messages, llm.Message{
+		Role:       role,
+		Content:    content,
+		ToolCalls:  nil,
+		ToolCallID: "",
+		ToolName:   "",
+		Timestamp:  0,
+	})
+}
+
+func nonBlankStrings(in []string) []string {
+	out := in[:0:0]
+	for _, s := range in {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+
+	return out
 }
