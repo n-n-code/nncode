@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"nncode/internal/agent"
+	"nncode/internal/agentloop"
 	"nncode/internal/config"
 	"nncode/internal/doctor"
 	"nncode/internal/llm"
@@ -35,8 +36,13 @@ const defaultDoctorTimeout = 10 * time.Second
 var (
 	errUnexpectedArg       = errors.New("unexpected argument")
 	errUnexpectedDoctorArg = errors.New("unexpected doctor argument")
+	errUnexpectedLoopArg   = errors.New("unexpected loop argument")
+	errLoopArgRequired     = errors.New("loop argument required")
+	errLoopCommandRequired = errors.New("loop subcommand is required")
+	errUnknownLoopCommand  = errors.New("unknown loop subcommand")
 	errModelNotConfigured  = errors.New("model is not configured")
 	errDoctorFoundProblems = errors.New("doctor found problems")
+	errLoopRequiresPiped   = errors.New("-loop requires piped stdin; use /loop in interactive mode")
 )
 
 func main() {
@@ -56,9 +62,15 @@ func runWithArgs(args []string) error {
 		return runDoctorCommand(args[1:])
 	}
 
+	if len(args) > 0 && args[0] == "loop" {
+		return runLoopCommand(args[1:])
+	}
+
 	flags := flag.NewFlagSet("nncode", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	modelFlag := flags.String("model", "", "model name to use (overrides default_model from config)")
+	loopFlag := flags.String("loop", "", "Agent Loop name or path to run with piped stdin")
+	loopCheckFlag := flags.String("loop-check", "", "validate an Agent Loop name or path and exit")
 	resumeFlag := flags.String("resume", "", "session ID or path to resume before running")
 	checkFlag := flags.Bool("check", false, "run setup diagnostics and exit")
 
@@ -83,13 +95,13 @@ func runWithArgs(args []string) error {
 		return fmt.Errorf("%w: %q", errUnexpectedArg, flags.Arg(0))
 	}
 
-	cfg, err := loadMergedConfig()
-	if err != nil {
-		return err
+	if *loopCheckFlag != "" {
+		return runLoopCheck(*loopCheckFlag)
 	}
 
-	if *modelFlag != "" {
-		cfg.AutoVendModel(*modelFlag)
+	cfg, err := prepareConfig(*modelFlag)
+	if err != nil {
+		return err
 	}
 
 	if *checkFlag {
@@ -101,7 +113,131 @@ func runWithArgs(args []string) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	return runAgent(cfg, *modelFlag, *resumeFlag, *strictFlag, *dryRunFlag, *noTUIFlag)
+	return runAgent(cfg, *modelFlag, *loopFlag, *resumeFlag, *strictFlag, *dryRunFlag, *noTUIFlag)
+}
+
+func prepareConfig(modelFlag string) (*config.Config, error) {
+	cfg, err := loadMergedConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	if modelFlag != "" {
+		cfg.AutoVendModel(modelFlag)
+	}
+
+	return cfg, nil
+}
+
+func runLoopCheck(ref string) error {
+	summary, err := agentloop.Validate(ref, agentloop.StoreOptions{})
+	if err != nil {
+		return fmt.Errorf("validate Agent Loop %q: %w", ref, err)
+	}
+
+	fmt.Fprintf(os.Stdout, "Agent Loop %q is valid (%s).\n", summary.Ref, summary.Path)
+
+	return nil
+}
+
+func runLoopCommand(args []string) error {
+	if len(args) == 0 {
+		return errLoopCommandRequired
+	}
+
+	switch args[0] {
+	case "list":
+		return runLoopListCommand(args[1:])
+	case "check":
+		return runLoopCheckCommand(args[1:])
+	case "run":
+		return runLoopRunCommand(args[1:])
+	default:
+		return fmt.Errorf("%w: %q", errUnknownLoopCommand, args[0])
+	}
+}
+
+func runLoopListCommand(args []string) error {
+	flags := flag.NewFlagSet("nncode loop list", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+
+	err := flags.Parse(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+
+		return fmt.Errorf("parse loop list flags: %w", err)
+	}
+
+	if flags.NArg() > 0 {
+		return fmt.Errorf("%w: %q", errUnexpectedLoopArg, flags.Arg(0))
+	}
+
+	summaries, err := agentloop.List(agentloop.StoreOptions{})
+	if err != nil {
+		return fmt.Errorf("list Agent Loops: %w", err)
+	}
+
+	agentloop.WriteSummaries(os.Stdout, summaries, 0)
+
+	return nil
+}
+
+func runLoopCheckCommand(args []string) error {
+	flags := flag.NewFlagSet("nncode loop check", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+
+	err := flags.Parse(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+
+		return fmt.Errorf("parse loop check flags: %w", err)
+	}
+
+	if flags.NArg() != 1 {
+		return fmt.Errorf("%w: loop check requires exactly one name or path", errLoopArgRequired)
+	}
+
+	return runLoopCheck(flags.Arg(0))
+}
+
+func runLoopRunCommand(args []string) error {
+	flags := flag.NewFlagSet("nncode loop run", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	modelFlag := flags.String("model", "", "model name to use (overrides default_model from config)")
+	resumeFlag := flags.String("resume", "", "session ID or path to resume before running")
+	strictFlag := flags.Bool("strict", false,
+		"in piped mode, exit non-zero if the agent produces no response and no successful effectful tool call")
+	dryRunFlag := flags.Bool("dry-run", false,
+		"preview effectful tool calls without executing them")
+	noTUIFlag := flags.Bool("no-tui", false, "force plain CLI even in interactive terminal mode")
+
+	err := flags.Parse(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+
+		return fmt.Errorf("parse loop run flags: %w", err)
+	}
+
+	if flags.NArg() != 1 {
+		return fmt.Errorf("%w: loop run requires exactly one name or path", errLoopArgRequired)
+	}
+
+	cfg, err := prepareConfig(*modelFlag)
+	if err != nil {
+		return err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	return runAgent(cfg, *modelFlag, flags.Arg(0), *resumeFlag, *strictFlag, *dryRunFlag, *noTUIFlag)
 }
 
 func loadMergedConfig() (*config.Config, error) {
@@ -120,7 +256,15 @@ func loadMergedConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
-func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPiped, dryRun, noTUI bool) error {
+func runAgent(
+	cfg *config.Config,
+	modelFlag string,
+	loopRef string,
+	resumeRef string,
+	strictPiped bool,
+	dryRun bool,
+	noTUI bool,
+) error {
 	modelName := modelFlag
 	if modelName == "" {
 		modelName = cfg.DefaultModel
@@ -175,7 +319,13 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 		}
 	}
 
-	useTUI := !noTUI && stdinIsTerminal()
+	isTerminal := stdinIsTerminal()
+	if loopRef != "" && isTerminal {
+		return errLoopRequiresPiped
+	}
+
+	useTUI := !noTUI && isTerminal
+
 	if useTUI {
 		err = tui.Run(ag, cfg, sess, skillRegistry, skillActivator)
 		if err != nil {
@@ -187,6 +337,7 @@ func runAgent(cfg *config.Config, modelFlag string, resumeRef string, strictPipe
 
 	cliInst := cli.New(ag, cfg, sess,
 		cli.WithSkills(skillRegistry, skillActivator),
+		cli.WithLoopRef(loopRef),
 		cli.WithStrictPiped(strictPiped))
 
 	err = cliInst.Run()
@@ -227,13 +378,9 @@ func runDoctorCommand(args []string) error {
 		return fmt.Errorf("%w: %q", errUnexpectedDoctorArg, flags.Arg(0))
 	}
 
-	cfg, err := loadMergedConfig()
+	cfg, err := prepareConfig(*modelFlag)
 	if err != nil {
 		return err
-	}
-
-	if *modelFlag != "" {
-		cfg.AutoVendModel(*modelFlag)
 	}
 
 	return runDoctorReport(cfg, *modelFlag, *liveFlag, *timeoutFlag)

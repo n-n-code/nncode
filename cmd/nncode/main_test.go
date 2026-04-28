@@ -112,6 +112,27 @@ func TestRunWithArgsDoctor_AutoVendsUnknownModel(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRunWithArgsLoopCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(tmpDir)
+	writeMainTestLoop(t, tmpDir, "check-me")
+
+	err := runWithArgs([]string{"-loop-check", "check-me"})
+
+	require.NoError(t, err)
+}
+
+func TestRunWithArgsLoopSubcommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(tmpDir)
+	writeMainTestLoop(t, tmpDir, "check-me")
+
+	require.NoError(t, runWithArgs([]string{"loop", "list"}))
+	require.NoError(t, runWithArgs([]string{"loop", "check", "check-me"}))
+}
+
 func TestBuildModelUsesConfiguredModelID(t *testing.T) {
 	model := buildModel("alias", config.Model{ID: "provider-id", BaseURL: "http://127.0.0.1:8033/v1"})
 
@@ -135,4 +156,20 @@ func TestComposeSystemPrompt_TrimsTrailingNewlines(t *testing.T) {
 	result := composeSystemPrompt("base\n\n")
 
 	assert.True(t, strings.HasPrefix(result, "base\n\nThe current working directory is "), "should trim trailing newlines then add exactly two before cwd")
+}
+
+func writeMainTestLoop(t *testing.T, root string, name string) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".nncode", "loops"), 0755))
+	loopJSON := `{
+		"schema_version": 1,
+		"name": "` + name + `",
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"entry"},
+			{"id":"prompt","type":"prompt","content":"prompt"},
+			{"id":"exit","type":"exit_criteria","content":"done"}
+		]
+	}`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".nncode", "loops", name+".json"), []byte(loopJSON), 0644))
 }

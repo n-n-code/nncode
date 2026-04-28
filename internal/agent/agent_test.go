@@ -316,6 +316,17 @@ func TestAgent_SystemPromptOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestAgent_AddObservationMessageUsesUserCompatibleRole(t *testing.T) {
+	agent := New(Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "")
+
+	agent.AddObservationMessage("observed context")
+
+	msgs := agent.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, llm.RoleUser, msgs[0].Role)
+	assert.Equal(t, "observed context", msgs[0].Content)
+}
+
 func TestAgent_BuildTools(t *testing.T) {
 	mock := &mockClient{Fallback: scriptText("x")}
 	tool := Tool{Name: "read", Description: "reads", Parameters: `{"type":"object"}`}
@@ -459,4 +470,46 @@ func TestAgent_ParallelPreservesEventOrder(t *testing.T) {
 	assert.Equal(t, "read-result", results[0].Result)
 	assert.Equal(t, "c2", results[1].ToolID)
 	assert.Equal(t, "write-result", results[1].Result)
+}
+
+func TestAgent_RunWithOptionsOverridesRequestOnly(t *testing.T) {
+	mock := &mockClient{Fallback: scriptText("ok")}
+	agent := New(Config{
+		Model:     llm.Model{ID: "base", BaseURL: "http://base.example/v1"},
+		Client:    mock,
+		MaxTokens: 100,
+	}, "")
+
+	drain(agent.RunWithOptions(context.Background(), "do", RunOptions{
+		Model:                llm.Model{ID: "override", BaseURL: "http://override.example/v1"},
+		MaxTokens:            42,
+		ScopedSystemMessages: nil,
+	}))
+
+	assert.Equal(t, "override", mock.LastRequest.Model.ID)
+	assert.Equal(t, "http://override.example/v1", mock.LastRequest.Model.BaseURL)
+	assert.Equal(t, 42, mock.LastRequest.MaxTokens)
+	assert.Equal(t, "base", agent.Model().ID)
+}
+
+func TestAgent_RunWithOptionsScopedSystemMessagesAreNotPersisted(t *testing.T) {
+	mock := &mockClient{Fallback: scriptText("ok")}
+	agent := New(Config{Model: llm.Model{ID: "test"}, Client: mock}, "base system")
+
+	drain(agent.RunWithOptions(context.Background(), "do", RunOptions{
+		Model:                llm.Model{ID: "", BaseURL: ""},
+		MaxTokens:            0,
+		ScopedSystemMessages: []string{"scoped only"},
+	}))
+
+	require.Len(t, mock.LastRequest.Messages, 3)
+	assert.Equal(t, llm.RoleSystem, mock.LastRequest.Messages[0].Role)
+	assert.Equal(t, "base system", mock.LastRequest.Messages[0].Content)
+	assert.Equal(t, llm.RoleSystem, mock.LastRequest.Messages[1].Role)
+	assert.Equal(t, "scoped only", mock.LastRequest.Messages[1].Content)
+
+	for _, msg := range agent.Messages() {
+		assert.NotEqual(t, llm.RoleSystem, msg.Role)
+		assert.NotContains(t, msg.Content, "scoped only")
+	}
 }

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -135,6 +137,145 @@ func TestSlashCommandHelpOpensOverlay(t *testing.T) {
 	m = updated.(*model)
 	assert.Equal(t, overlayHelp, m.overlay)
 	assert.NotEmpty(t, m.overlayItems)
+}
+
+func TestSlashCommandLoopsOpensOverlay(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeTUITestLoop(t, root, "run-me", `{
+		"schema_version": 1,
+		"name": "display-name",
+		"description": "review loop",
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	m := newTestModel(&mockClient{})
+	m.width = 100
+	m.height = 30
+	m.recalcLayout()
+	updated, _ := m.handleSlashCommand("/loops")
+	m = updated.(*model)
+	assert.Equal(t, overlayLoops, m.overlay)
+	items := strings.Join(m.overlayItems, "\n")
+	assert.Contains(t, items, "run-me")
+	assert.Contains(t, items, "OK")
+	require.Len(t, m.loopSummaries, 1)
+	assert.Equal(t, "display-name", m.loopSummaries[0].Name)
+	assert.Contains(t, m.overlayView(), "nodes:")
+}
+
+func TestLoopsOverlayEnterRunsSelectedLoop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	writeTUITestLoop(t, root, "run-me", `{
+		"schema_version": 1,
+		"name": "run-me",
+		"settings": {"max_iterations": 1},
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	client := &mockClient{scripts: [][]llm.StreamEvent{
+		textEvents("entry ok"),
+		textEvents("prompt ok"),
+		textEvents("LOOP_EXIT: yes"),
+	}}
+	m := newTestModel(client)
+	updated, _ := m.handleSlashCommand("/loops")
+	m = updated.(*model)
+
+	next, cmd := m.selectOverlayItem()
+	m = next
+
+	require.True(t, m.running)
+	require.NotNil(t, cmd)
+	assert.Equal(t, overlayNone, m.overlay)
+	assert.Contains(t, m.messages[0].Text, "/loop run-me")
+
+	for {
+		msg := nextEventCmd(m.eventCh)()
+		teaModel, _ := m.Update(msg)
+		m = teaModel.(*model)
+		if _, ok := msg.(agentDoneMsg); ok {
+			break
+		}
+	}
+
+	assert.False(t, m.running)
+	assert.Equal(t, 3, client.calls)
+}
+
+func TestSlashCommandLoopValidate(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeTUITestLoop(t, root, "review", `{
+		"schema_version": 1,
+		"name": "review",
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	m := newTestModel(&mockClient{})
+	updated, _ := m.handleSlashCommand("/loop-validate review")
+	m = updated.(*model)
+	require.Len(t, m.messages, 1)
+	assert.Equal(t, kindAssistant, m.messages[0].Kind)
+	assert.Contains(t, m.messages[0].Text, "Agent Loop \"review\" is valid")
+}
+
+func TestSlashCommandLoopRuns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	writeTUITestLoop(t, root, "review", `{
+		"schema_version": 1,
+		"name": "review",
+		"settings": {"max_iterations": 1},
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start {{input}}"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	client := &mockClient{scripts: [][]llm.StreamEvent{
+		textEvents("entry ok"),
+		textEvents("prompt ok"),
+		textEvents("LOOP_EXIT: yes"),
+	}}
+	m := newTestModel(client)
+	updated, _ := m.handleSlashCommand("/loop review ship it")
+	m = updated.(*model)
+
+	require.True(t, m.running)
+	require.Len(t, m.messages, 1)
+	assert.Equal(t, kindUser, m.messages[0].Kind)
+	assert.Contains(t, m.messages[0].Text, "/loop review ship it")
+
+	for {
+		msg := nextEventCmd(m.eventCh)()
+		updated, _ = m.Update(msg)
+		m = updated.(*model)
+		if _, ok := msg.(agentDoneMsg); ok {
+			break
+		}
+	}
+
+	assert.False(t, m.running)
+	assert.Equal(t, 3, client.calls)
+	assert.True(t, containsMessageText(m.messages, "prompt ok"))
+	assert.True(t, containsMessageText(m.messages, "exit criteria: exit"))
 }
 
 func TestSlashCommandSessionUsesSessionOverlay(t *testing.T) {
@@ -301,4 +442,22 @@ func TestKeyCtrlCQuits(t *testing.T) {
 	require.NotNil(t, cmd)
 	quitMsg := cmd()
 	require.IsType(t, tea.QuitMsg{}, quitMsg)
+}
+
+func writeTUITestLoop(t *testing.T, root string, name string, body string) {
+	t.Helper()
+
+	dir := filepath.Join(root, ".nncode", "loops")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o644))
+}
+
+func containsMessageText(messages []msgItem, text string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg.Text, text) {
+			return true
+		}
+	}
+
+	return false
 }

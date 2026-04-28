@@ -14,6 +14,7 @@ Stripped down to essentials: an agent loop, a few tools, and a CLI. No sub-agent
 - **Parallel reads**: Non-effectful tools run concurrently; effectful tools stay sequential
 - **Auto-context**: Detects `go.mod`, `package.json`, `Cargo.toml`, and other project files on startup and injects a compact summary into the system prompt
 - **Agent Skills**: progressive local skill discovery from `.agents/skills`
+- **Agent Loops**: reusable prompt loops from `.nncode/loops` or `~/.nncode/loops`
 - **Sessions**: JSONL persistence to `~/.nncode/sessions/`
 - **Config**: Global and project-local settings via JSON
 - **Events**: Real-time streaming of text, tool calls, and errors
@@ -64,6 +65,7 @@ nncode -resume 123456789  # resume a saved session before chatting
 nncode -dry-run           # preview effectful tools without executing them
 > list the files in the current directory
 > read main.go and summarize it
+> /loop implement-review-fix add the requested feature
 ```
 
 ### Non-interactive (print and exit)
@@ -72,6 +74,11 @@ nncode -dry-run           # preview effectful tools without executing them
 echo "summarize this codebase" | nncode
 echo "…" | nncode -model gpt-4o-mini
 echo "make the requested edit" | nncode -strict
+echo "add the requested feature" | nncode -loop implement-review-fix -strict
+nncode -loop-check implement-review-fix
+nncode loop list
+echo "add the requested feature" | nncode loop run implement-review-fix -strict
+nncode loop check implement-review-fix
 ```
 
 In piped mode, nncode warns if the agent exits without assistant text and without a successful effectful tool call (`write`, `edit`, `patch`, or `bash`). Add `-strict` to turn that incomplete-turn warning into a non-zero exit for automation.
@@ -86,7 +93,7 @@ nncode doctor -timeout 30s
 nncode -check             # shorthand for non-live diagnostics
 ```
 
-`doctor -live` sends a tiny prompt to the selected model. Without `-live`, diagnostics stay local and offline. Doctor also checks Agent Skills discovery and reports skill issues as warnings, not startup failures.
+`doctor -live` sends a tiny prompt to the selected model. Without `-live`, diagnostics stay local and offline. Doctor also checks Agent Skills and Agent Loops discovery and reports those issues as warnings, not startup failures.
 
 ### Built-in commands
 
@@ -102,6 +109,9 @@ nncode -check             # shorthand for non-live diagnostics
 | `/tools` | List available tools |
 | `/skills` | List discovered Agent Skills and diagnostics |
 | `/skill:name [message]` | Activate a skill manually, optionally then run a message |
+| `/loops` | Browse configured Agent Loops |
+| `/loop <name\|path> [message]` | Run an Agent Loop, optionally with a message |
+| `/loop-validate <name\|path>` | Validate an Agent Loop file |
 | `/prompt` | Show the active system prompt |
 
 ## Configuration
@@ -178,6 +188,67 @@ Write to `~/.nncode/system_prompt.md` for a global override, or `./.nncode/syste
 
 If model-visible Agent Skills are discovered, nncode appends a compact generated catalog to this base prompt. `/prompt` shows the full composed prompt. The generated catalog is capped at 64 skills or about 12 KB, whichever comes first; the same capped subset is exposed in the `activate_skill` tool enum. If it is truncated, `/skills` and `doctor` show a diagnostic.
 
+### Agent Loops
+
+Agent Loops are reusable prompt loops stored as strict JSON files in:
+
+- **Project-local**: `./.nncode/loops/<name>.json`
+- **Global**: `~/.nncode/loops/<name>.json`
+
+Project-local loops win over global loops with the same filename. Use `/loops` to browse runnable refs in the TUI, `/loop <name> [message]` in interactive mode, `nncode -loop <name>` or `nncode loop run <name>` with piped stdin, and `nncode -loop-check <name>` or `nncode loop check <name>` to validate a loop without running a model request. `nncode loop list` prints the same configured loop list from scripts.
+
+An example loop is checked in at `examples/loops/implement-review-fix.json`. To try it, copy it into `./.nncode/loops/` or pass the file path directly to `/loop`, `-loop`, or `nncode loop run`.
+
+V1 loops are linear and versioned with `schema_version: 1`: nncode runs one `entry_prompt`, repeats all body nodes (`prompt` or `cmd`) followed by one `exit_criteria`, then runs an optional `exit_prompt` once when the criteria passes. Exit criteria prompts must produce a `LOOP_EXIT: yes` or `LOOP_EXIT: no` line; the marker is stripped from terminal output. See the full authoring reference in [`docs/agent-loops-v1.md`](docs/agent-loops-v1.md) and the machine-readable schema in [`docs/agent-loops-v1.schema.json`](docs/agent-loops-v1.schema.json).
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "name": "implement-review-fix",
+  "description": "Implement, review, and refine until done.",
+  "settings": {
+    "model": "gpt-4o",
+    "max_iterations": 10
+  },
+  "nodes": [
+    {
+      "id": "entry",
+      "type": "entry_prompt",
+      "locked": true,
+      "content": "Start this task:\n\n{{input}}"
+    },
+    {
+      "id": "implement",
+      "type": "prompt",
+      "locked": false,
+      "settings": { "model": "gpt-4o-mini" },
+      "content": "Implement the next useful slice."
+    },
+    {
+      "id": "test",
+      "type": "cmd",
+      "settings": { "on_error": "continue" },
+      "content": "go test ./..."
+    },
+    {
+      "id": "done",
+      "type": "exit_criteria",
+      "locked": true,
+      "content": "Exit when the requested behavior is implemented and relevant validation passes."
+    },
+    {
+      "id": "final",
+      "type": "exit_prompt",
+      "content": "Summarize what changed and what was verified."
+    }
+  ]
+}
+```
+
+Node types are `entry_prompt`, `prompt`, `cmd`, `exit_criteria`, and `exit_prompt`. Node-level `settings.model` overrides loop-level `settings.model`, which overrides the active model. `cmd` nodes execute `content` through `bash -c`, use the same workspace root, timeout, and output limits as the `bash` tool, and default to aborting the loop on failure unless `settings.on_error` is `"continue"`. Loop JSON is strict: unknown fields are rejected instead of ignored. Unlocked loop files are ordinary files the agent may edit during a run; locked nodes are restored after each loop step if their content or settings change. Loop-specific system instructions are scoped to the loop run and are not saved into session history.
+
 ### Agent Skills
 
 nncode supports local Agent Skills using progressive disclosure:
@@ -237,6 +308,7 @@ nncode/
 │   │   ├── loop.go           # Core agentLoop
 │   │   ├── event.go          # Event types
 │   │   └── tool.go           # Tool interface
+│   ├── agentloop/            # User-defined Agent Loop loading and orchestration
 │   ├── llm/                  # LLM abstraction
 │   │   ├── client.go         # Client interface, StreamEvent
 │   │   └── openai.go         # OpenAI provider

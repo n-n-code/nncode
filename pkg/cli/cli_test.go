@@ -63,6 +63,10 @@ func textEvents(text string) []llm.StreamEvent {
 	}
 }
 
+func doneEvents() []llm.StreamEvent {
+	return []llm.StreamEvent{{Done: &llm.Done{StopReason: "stop"}}}
+}
+
 func toolCallEvents(id string, name string, args string) []llm.StreamEvent {
 	call := llm.ToolCall{ID: id, Name: name, Args: json.RawMessage(args)}
 
@@ -369,6 +373,152 @@ func TestRun_ToolResultPreviewHidesActivationMarker(t *testing.T) {
 	assert.Empty(t, errOut.String())
 }
 
+func TestRun_PipedLoopRunsAndStripsExitMarker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	writeCLITestLoop(t, root, "review", `{
+		"schema_version": 1,
+		"name": "review",
+		"settings": {"max_iterations": 1},
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start {{input}}"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	client := &mockClient{scripts: [][]llm.StreamEvent{
+		textEvents("entry ok"),
+		textEvents("prompt ok"),
+		textEvents("done\nLOOP_EXIT: yes"),
+	}}
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
+	var out, errOut bytes.Buffer
+
+	c := New(ag, testConfig(), session.New(),
+		WithIO(strings.NewReader("ship it"), &out, &errOut, false),
+		WithLoopRef("review"),
+		WithStrictPiped(true))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, client.calls)
+	assert.Contains(t, out.String(), "entry ok")
+	assert.Contains(t, out.String(), "prompt ok")
+	assert.Contains(t, out.String(), "done")
+	assert.NotContains(t, out.String(), "LOOP_EXIT")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRun_PipedLoopCmdCountsAsEffectfulForStrict(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	writeCLITestLoop(t, root, "cmd-loop", `{
+		"schema_version": 1,
+		"name": "cmd-loop",
+		"settings": {"max_iterations": 1},
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start {{input}}"},
+			{"id":"cmd","type":"cmd","content":"printf cli-cmd"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	client := &mockClient{scripts: [][]llm.StreamEvent{
+		doneEvents(),
+		textEvents("LOOP_EXIT: yes"),
+	}}
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
+	var out, errOut bytes.Buffer
+
+	c := New(ag, testConfig(), session.New(),
+		WithIO(strings.NewReader("ship it"), &out, &errOut, false),
+		WithLoopRef("cmd-loop"),
+		WithStrictPiped(true))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "cli-cmd")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRun_InteractiveLoopCommands(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	writeCLITestLoop(t, root, "review", `{
+		"schema_version": 1,
+		"name": "review",
+		"description": "review loop",
+		"settings": {"max_iterations": 1},
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start {{input}}"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	client := &mockClient{scripts: [][]llm.StreamEvent{
+		textEvents("entry ok"),
+		textEvents("prompt ok"),
+		textEvents("LOOP_EXIT: yes"),
+	}}
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
+	var out, errOut bytes.Buffer
+
+	input := strings.NewReader("/loops\n/loop review ship it\n/quit\n")
+	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, client.calls)
+	assert.Contains(t, out.String(), "Agent Loops")
+	assert.Contains(t, out.String(), "review loop")
+	assert.Contains(t, out.String(), "entry ok")
+	assert.Contains(t, out.String(), "prompt ok")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRun_InteractiveLoopListShowsRunnableRefAndValidate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	t.Chdir(root)
+	writeCLITestLoop(t, root, "run-me", `{
+		"schema_version": 1,
+		"name": "display-name",
+		"description": "shown from definition",
+		"nodes": [
+			{"id":"entry","type":"entry_prompt","content":"Start"},
+			{"id":"prompt","type":"prompt","content":"Work"},
+			{"id":"exit","type":"exit_criteria","content":"Done?"}
+		]
+	}`)
+
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+
+	var out, errOut bytes.Buffer
+
+	input := strings.NewReader("/loops\n/loop-validate run-me\n/quit\n")
+	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	text := out.String()
+	assert.Contains(t, text, "run-me")
+	assert.Contains(t, text, "name: display-name")
+	assert.Contains(t, text, "Agent Loop \"run-me\" is valid")
+	assert.Empty(t, errOut.String())
+}
+
 func TestRun_InteractiveListsAndResumesSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -402,4 +552,12 @@ func writeCLITestSkill(t *testing.T, root string, dirName string, frontmatter st
 	dir := filepath.Join(root, ".agents", "skills", dirName)
 	require.NoError(t, os.MkdirAll(dir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\n"+frontmatter+"---\n"+body), 0644))
+}
+
+func writeCLITestLoop(t *testing.T, root string, name string, body string) {
+	t.Helper()
+
+	dir := filepath.Join(root, ".nncode", "loops")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0644))
 }

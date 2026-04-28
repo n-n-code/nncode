@@ -18,6 +18,7 @@ const (
 	kindToolCall
 	kindToolResult
 	kindError
+	kindLoopStatus
 )
 
 // msgItem is a single renderable unit in the conversation history.
@@ -44,6 +45,8 @@ func (m msgItem) Render(width int) string {
 		return renderToolResult(m.ToolName, m.Result, m.IsError, m.Expanded, width)
 	case kindError:
 		return Error.Render("error: " + m.Text)
+	case kindLoopStatus:
+		return renderLoopStatus(m.Text, width)
 	default:
 		return m.Text
 	}
@@ -162,6 +165,22 @@ func renderToolResult(name, result string, isError, expanded bool, width int) st
 
 	if isError {
 		return Error.Render(prefix + preview)
+	}
+
+	return ToolResult.Render(prefix + preview)
+}
+
+func renderLoopStatus(text string, width int) string {
+	if text == "" {
+		return ""
+	}
+
+	prefix := "↻ "
+	padding := lipgloss.Width(ToolResult.Render(""))
+	available := max(width-lipgloss.Width(prefix)-padding, 1)
+	preview := truncateInline(text, available)
+	if lipgloss.Width(preview) < available {
+		preview += strings.Repeat(" ", available-lipgloss.Width(preview))
 	}
 
 	return ToolResult.Render(prefix + preview)

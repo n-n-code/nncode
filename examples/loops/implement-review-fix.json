@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "name": "implement-review-fix",
+  "description": "Implement, review, and refine a coding task until the exit criteria pass.",
+  "settings": {
+    "max_iterations": 5
+  },
+  "nodes": [
+    {
+      "id": "entry",
+      "type": "entry_prompt",
+      "locked": true,
+      "content": "Start this coding task:\n\n{{input}}\n\nRead the relevant files first, then make the smallest coherent change."
+    },
+    {
+      "id": "implement",
+      "type": "prompt",
+      "locked": false,
+      "content": "Implement the next useful slice of the task. Keep changes scoped, follow the repo's existing patterns, and update tests or docs when the behavior changes."
+    },
+    {
+      "id": "review",
+      "type": "prompt",
+      "locked": false,
+      "content": "Review the current work for correctness, missing tests, regressions, and user-facing gaps. Fix any concrete issues you find before moving on."
+    },
+    {
+      "id": "exit",
+      "type": "exit_criteria",
+      "locked": true,
+      "content": "Exit only when the requested task is implemented, relevant tests or validation have passed, and there are no known blocking issues. If validation cannot be run, continue unless the reason is clearly outside this environment."
+    },
+    {
+      "id": "final",
+      "type": "exit_prompt",
+      "locked": false,
+      "content": "Summarize the implementation, files changed, validation run, and any remaining gaps."
+    }
+  ]
+}

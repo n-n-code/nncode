@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"nncode/internal/agent"
+	"nncode/internal/agentloop"
 	"nncode/internal/llm"
 	"nncode/internal/session"
 	"nncode/internal/skills"
@@ -237,6 +238,12 @@ func (m *model) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.loadToolsOverlay()
 	case "/skills":
 		m.loadSkillsOverlay()
+	case "/loops":
+		m.loadLoopsOverlay()
+	case "/loop":
+		return m.handleLoopCommand(line)
+	case "/loop-validate":
+		m.validateLoopCommand(fields)
 	case "/prompt":
 		m.overlayItems = []string{m.agent.SystemPrompt()}
 		m.overlay = overlayPrompt
@@ -245,6 +252,77 @@ func (m *model) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+//nolint:ireturn // Required by tea.Model interface.
+func (m *model) handleLoopCommand(line string) (tea.Model, tea.Cmd) {
+	rest := strings.TrimSpace(strings.TrimPrefix(line, "/loop"))
+	if rest == "" {
+		m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /loop <name|path> [message]"})
+
+		return m, nil
+	}
+
+	ref, prompt, _ := strings.Cut(rest, " ")
+	prompt = strings.TrimSpace(prompt)
+
+	display := "/loop " + ref
+	if prompt != "" {
+		display += " " + prompt
+	}
+
+	m.appendMessage(msgItem{Kind: kindUser, Text: display})
+	m.running = true
+	m.textarea.Blur()
+
+	var runCtx context.Context
+	runCtx, m.runCancel = context.WithCancel(context.Background())
+
+	runner := agentloop.Runner{
+		Agent:        m.agent,
+		Config:       m.cfg,
+		StoreOptions: agentloop.StoreOptions{},
+	}
+
+	events, err := runner.Run(runCtx, ref, prompt)
+	if err != nil {
+		if m.runCancel != nil {
+			m.runCancel()
+		}
+
+		m.running = false
+		m.textarea.Focus()
+		m.appendMessage(msgItem{Kind: kindError, Text: err.Error()})
+
+		return m, nil
+	}
+
+	m.eventCh = events
+
+	return m, tea.Batch(
+		nextEventCmd(m.eventCh),
+		m.spinner.Tick,
+	)
+}
+
+func (m *model) validateLoopCommand(fields []string) {
+	if len(fields) != 2 {
+		m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /loop-validate <name|path>"})
+
+		return
+	}
+
+	summary, err := agentloop.Validate(fields[1], agentloop.StoreOptions{})
+	if err != nil {
+		m.appendMessage(msgItem{Kind: kindError, Text: "Agent Loop invalid: " + err.Error()})
+
+		return
+	}
+
+	m.appendMessage(msgItem{
+		Kind: kindAssistant,
+		Text: "Agent Loop \"" + summary.Ref + "\" is valid (" + summary.Path + ").",
+	})
 }
 
 // handleSkillCommand handles /skill:name [msg].
@@ -326,11 +404,26 @@ func (m *model) handleAgentEvent(ev agent.Event) {
 		}
 	case agent.EventDone:
 		// no-op
+	case agent.EventLoopStart,
+		agent.EventLoopIterationStart,
+		agent.EventLoopNodeStart,
+		agent.EventLoopNodeEnd,
+		agent.EventLoopExitDecision:
+		m.appendLoopStatus(ev)
 	case agent.EventTurnStart, agent.EventTurnEnd:
 		// no-op
 	default:
 		// no-op
 	}
+}
+
+func (m *model) appendLoopStatus(ev agent.Event) {
+	text := ev.LoopText()
+	if text == "" {
+		return
+	}
+
+	m.appendMessage(msgItem{Kind: kindLoopStatus, Text: text})
 }
 
 // resumeSession loads a session by id or path.

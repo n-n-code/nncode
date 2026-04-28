@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "nncode Agent Loop v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "nodes"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Agent Loop schema version. v1 files must use 1."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Human-readable loop name."
+    },
+    "description": {
+      "type": "string",
+      "description": "Short summary shown by list and TUI views."
+    },
+    "settings": {
+      "$ref": "#/$defs/loopSettings"
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    }
+  },
+  "$defs": {
+    "loopSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "llmNodeSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      }
+    },
+    "cmdNodeSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "on_error": {
+          "enum": ["abort", "continue"]
+        }
+      }
+    },
+    "baseNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "type": {
+          "type": "string"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "settings": {
+          "type": "object"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
+    },
+    "entryPromptNode": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseNode"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "entry_prompt"
+            },
+            "settings": {
+              "$ref": "#/$defs/llmNodeSettings"
+            }
+          }
+        }
+      ]
+    },
+    "promptNode": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseNode"
+        },
+        {
+          "type": "object",
+          "required": ["content"],
+          "properties": {
+            "type": {
+              "const": "prompt"
+            },
+            "settings": {
+              "$ref": "#/$defs/llmNodeSettings"
+            },
+            "content": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          }
+        }
+      ]
+    },
+    "cmdNode": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseNode"
+        },
+        {
+          "type": "object",
+          "required": ["content"],
+          "properties": {
+            "type": {
+              "const": "cmd"
+            },
+            "settings": {
+              "$ref": "#/$defs/cmdNodeSettings"
+            },
+            "content": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          }
+        }
+      ]
+    },
+    "exitCriteriaNode": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseNode"
+        },
+        {
+          "type": "object",
+          "required": ["content"],
+          "properties": {
+            "type": {
+              "const": "exit_criteria"
+            },
+            "settings": {
+              "$ref": "#/$defs/llmNodeSettings"
+            },
+            "content": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          }
+        }
+      ]
+    },
+    "exitPromptNode": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseNode"
+        },
+        {
+          "type": "object",
+          "required": ["content"],
+          "properties": {
+            "type": {
+              "const": "exit_prompt"
+            },
+            "settings": {
+              "$ref": "#/$defs/llmNodeSettings"
+            },
+            "content": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          }
+        }
+      ]
+    },
+    "node": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/entryPromptNode"
+        },
+        {
+          "$ref": "#/$defs/promptNode"
+        },
+        {
+          "$ref": "#/$defs/cmdNode"
+        },
+        {
+          "$ref": "#/$defs/exitCriteriaNode"
+        },
+        {
+          "$ref": "#/$defs/exitPromptNode"
+        }
+      ]
+    }
+  }
+}

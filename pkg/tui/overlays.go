@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"nncode/internal/agentloop"
 	"nncode/internal/session"
 )
 
@@ -15,6 +16,8 @@ const (
 	overlayFooterSelect      = "enter select  esc/q close  up/down navigate"
 	overlayFooterScroll      = "esc/q close  up/down scroll"
 	overlayHorizontalPadding = 4 // Overlay has Padding(1, 2): 2 left + 2 right.
+	loopDetailDivisor        = 3
+	loopDetailMinRows        = 3
 )
 
 func (m *model) handleOverlayKey(msg tea.KeyMsg) (*model, tea.Cmd) {
@@ -73,6 +76,25 @@ func (m *model) selectOverlayItem() (*model, tea.Cmd) {
 				return m, cmd
 			}
 		}
+	case overlayLoops:
+		if m.overlayIndex < len(m.loopSummaries) {
+			summary := m.loopSummaries[m.overlayIndex]
+			if summary.Err != nil {
+				m.appendMessage(msgItem{Kind: kindError, Text: "Agent Loop invalid: " + summary.Err.Error()})
+
+				return m, nil
+			}
+
+			m.dismissOverlay()
+
+			updated, cmd := m.handleLoopCommand("/loop " + summary.Ref)
+			next, ok := updated.(*model)
+			if !ok {
+				return m, cmd
+			}
+
+			return next, cmd
+		}
 	case overlayHelp, overlayTools, overlayPrompt, overlaySessionInfo:
 		m.dismissOverlay()
 	default:
@@ -86,6 +108,7 @@ func (m *model) dismissOverlay() {
 	m.overlay = overlayNone
 	m.overlayItems = nil
 	m.overlayIndex = 0
+	m.loopSummaries = nil
 }
 
 func (m *model) openHelpOverlay() {
@@ -159,12 +182,54 @@ func (m *model) loadSkillsOverlay() {
 	m.overlay = overlaySkills
 }
 
+func (m *model) loadLoopsOverlay() {
+	m.overlayItems = nil
+	m.loopSummaries = nil
+
+	summaries, err := agentloop.List(agentloop.StoreOptions{})
+	if err != nil {
+		m.appendMessage(msgItem{Kind: kindError, Text: "Failed to list Agent Loops: " + err.Error()})
+
+		return
+	}
+
+	if len(summaries) == 0 {
+		m.appendMessage(msgItem{Kind: kindAssistant, Text: "No Agent Loops configured."})
+
+		return
+	}
+
+	m.overlayItems = make([]string, 0, len(summaries))
+	m.loopSummaries = summaries
+	for _, summary := range summaries {
+		if summary.Err != nil {
+			m.overlayItems = append(m.overlayItems,
+				fmt.Sprintf("%-20s [%s] ERR %s", summary.Ref, summary.Scope,
+					truncateInline(summary.Err.Error(), descriptionPreviewLen)))
+
+			continue
+		}
+
+		description := summary.Description
+		if summary.Name != summary.Ref {
+			description = "name: " + summary.Name + "  " + description
+		}
+
+		m.overlayItems = append(m.overlayItems,
+			fmt.Sprintf("%-20s [%s] OK  %s", summary.Ref, summary.Scope,
+				truncateInline(description, descriptionPreviewLen)))
+	}
+	m.overlayIndex = 0
+	m.overlay = overlayLoops
+}
+
 //nolint:gochecknoglobals // Static lookup table for overlayKind→title.
 var overlayTitles = map[overlayKind]string{
 	overlayHelp:        "Help",
 	overlaySessions:    "Sessions",
 	overlaySkills:      "Skills",
 	overlayTools:       "Tools",
+	overlayLoops:       "Agent Loops",
 	overlayPrompt:      "System Prompt",
 	overlaySessionInfo: "Session",
 }
@@ -190,6 +255,10 @@ func (m *model) overlayContent(width, height int) string {
 		return m.helpOverlayContent(width, height)
 	}
 
+	if m.overlay == overlayLoops {
+		return m.loopOverlayContent(width, height)
+	}
+
 	rowWidth := max(width-barHorizontalPadding*2, 1)
 	rows := m.overlayRows(rowWidth)
 	footer := m.overlayFooter()
@@ -213,6 +282,90 @@ func (m *model) overlayContent(width, height int) string {
 	return fillBlock(OverlaySurface, builder.String(), width, height)
 }
 
+func (m *model) loopOverlayContent(width, height int) string {
+	rowWidth := max(width-barHorizontalPadding*2, 1)
+	rows := m.overlayRows(rowWidth)
+	footer := m.overlayFooter()
+	rowLimit := overlayRowLimit(height, footer)
+	detailRows := m.selectedLoopDetailRows(rowWidth)
+	detailLimit := min(len(detailRows), max(rowLimit/loopDetailDivisor, loopDetailMinRows))
+	listLimit := max(rowLimit-detailLimit-1, 1)
+	start, end := m.overlayWindow(len(rows), listLimit)
+
+	var builder strings.Builder
+	builder.WriteString(Title.Width(width).Render(overlayTitles[m.overlay]))
+	builder.WriteString("\n")
+	builder.WriteString("\n")
+
+	for index := start; index < end; index++ {
+		builder.WriteString(m.overlayRowView(index, rows[index], rowWidth))
+		builder.WriteString("\n")
+	}
+
+	if len(detailRows) > 0 {
+		builder.WriteString(TableCell.Width(rowWidth).Render(""))
+		builder.WriteString("\n")
+		for index := range min(detailLimit, len(detailRows)) {
+			builder.WriteString(TableCell.Width(rowWidth).Render(truncateInline(detailRows[index], rowWidth)))
+			builder.WriteString("\n")
+		}
+	}
+
+	if footer != "" {
+		builder.WriteString(OverlayHint.Width(width).Render(truncateInline(footer, width)))
+	}
+
+	return fillBlock(OverlaySurface, builder.String(), width, height)
+}
+
+func (m *model) selectedLoopDetailRows(width int) []string {
+	if m.overlayIndex >= len(m.loopSummaries) {
+		return nil
+	}
+
+	summary := m.loopSummaries[m.overlayIndex]
+	rows := []string{
+		"path: " + summary.Path,
+	}
+
+	if summary.Err != nil {
+		return append(rows, "error: "+summary.Err.Error())
+	}
+
+	rows = append(rows,
+		fmt.Sprintf("schema: v%d", summary.SchemaVersion),
+		"nodes: "+formatNodeSummaries(summary.Nodes),
+	)
+
+	description := strings.TrimSpace(summary.Description)
+	if summary.Name != summary.Ref {
+		rows = append(rows, "name: "+summary.Name)
+	}
+
+	if description != "" {
+		rows = append(rows, "description: "+truncateInline(description, max(width-len("description: "), 1)))
+	}
+
+	return rows
+}
+
+func formatNodeSummaries(nodes []agentloop.NodeSummary) string {
+	if len(nodes) == 0 {
+		return "(none)"
+	}
+
+	parts := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		label := node.ID + ":" + string(node.Type)
+		if node.Locked {
+			label += ":locked"
+		}
+		parts = append(parts, label)
+	}
+
+	return strings.Join(parts, " -> ")
+}
+
 // helpOverlayContent renders the help modal as an aligned two-column table.
 func (m *model) helpOverlayContent(width, height int) string {
 	type helpRow struct {
@@ -229,7 +382,10 @@ func (m *model) helpOverlayContent(width, height int) string {
 		{"/resume <id|path>", "Load a saved session"},
 		{"/tools", "List available tools"},
 		{"/skills", "List discovered Agent Skills"},
-		{"/skill:name [msg]", "Activate a skill, optionally then run msg"},
+		{"/skill:name [msg]", "Activate skill, optionally run msg"},
+		{"/loops", "Browse configured Agent Loops"},
+		{"/loop <name> [msg]", "Run an Agent Loop, optionally with msg"},
+		{"/loop-validate <name|path>", "Validate Agent Loop file"},
 		{"/prompt", "Show the current system prompt"},
 		{"alt+enter", "Insert a newline while typing"},
 		{"esc", "Leave input focus or close a popup"},
@@ -304,10 +460,14 @@ func (m *model) overlayRowView(index int, row string, width int) string {
 }
 
 func (m *model) overlaySelectable() bool {
-	return m.overlay == overlaySessions || m.overlay == overlaySkills
+	return m.overlay == overlaySessions || m.overlay == overlaySkills || m.overlay == overlayLoops
 }
 
 func (m *model) overlayFooter() string {
+	if m.overlay == overlayLoops {
+		return "enter run  esc/q close  up/down navigate"
+	}
+
 	if m.overlaySelectable() {
 		return overlayFooterSelect
 	}
@@ -407,7 +567,10 @@ func helpOverlayItems() []string {
 		"/resume <id|path>  Load a saved session",
 		"/tools             List available tools",
 		"/skills            List discovered Agent Skills",
-		"/skill:name [msg]  Activate a skill, optionally then run msg",
+		"/skill:name [msg]  Activate skill, optionally run msg",
+		"/loops             Browse configured Agent Loops",
+		"/loop <name> [msg] Run an Agent Loop, optionally with msg",
+		"/loop-validate <name|path> Validate Agent Loop file",
 		"/prompt            Show the current system prompt",
 		"alt+enter          Insert a newline while typing",
 		"esc                Leave input focus or close a popup",
