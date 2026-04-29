@@ -21,12 +21,15 @@ const (
 )
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolName   string     `json:"tool_name,omitempty"`
-	Timestamp  int64      `json:"timestamp,omitempty"`
+	Role       Role           `json:"role"`
+	Content    string         `json:"content"`
+	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	ToolName   string         `json:"tool_name,omitempty"`
+	Timestamp  int64          `json:"timestamp,omitempty"`
+	Usage      Usage          `json:"usage,omitzero"`
+	Model      string         `json:"model,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 type ToolCall struct {
@@ -58,9 +61,9 @@ type Request struct {
 }
 
 type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // StreamEvent is a tagged union. Exactly one field (Text, ToolStart, ToolEnd,

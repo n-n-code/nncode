@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
@@ -21,7 +22,7 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event, opts RunOptions) 
 			return
 		}
 
-		if !emit(ctx, out, Event{Type: EventTurnStart, Turn: turn}) {
+		if !emit(ctx, out, Event{Type: EventTurnStart, Turn: turn, ModelID: model.ID}) {
 			return
 		}
 
@@ -52,14 +53,17 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event, opts RunOptions) 
 			Role:      llm.RoleAssistant,
 			Content:   text,
 			ToolCalls: toolCalls,
+			Usage:     usage,
+			Model:     model.ID,
+			Metadata:  buildTurnMetadata(opts.Metadata, turn),
 		})
 
-		if !emit(ctx, out, Event{Type: EventTurnEnd, Turn: turn, Usage: usage}) {
+		if !emit(ctx, out, Event{Type: EventTurnEnd, Turn: turn, Usage: usage, ModelID: model.ID}) {
 			return
 		}
 
 		if len(toolCalls) == 0 {
-			emit(ctx, out, Event{Type: EventDone, Usage: usage})
+			emit(ctx, out, Event{Type: EventDone, Usage: usage, ModelID: model.ID})
 
 			return
 		}
@@ -78,7 +82,7 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event, opts RunOptions) 
 
 			go func(idx int, call llm.ToolCall) {
 				defer waitGroup.Done()
-				results[idx] = a.executeTool(ctx, call)
+				results[idx] = a.executeTool(ctx, call, turn)
 			}(i, tc)
 		}
 
@@ -90,38 +94,87 @@ func (a *Agent) runLoop(ctx context.Context, out chan<- Event, opts RunOptions) 
 			return
 		}
 
-		// Execute effectful tools sequentially in original order.
-		for i, tc := range toolCalls {
-			if !isEffectfulTool(tc.Name) {
-				continue
-			}
+		stopped := a.executeEffectfulTools(ctx, toolCalls, results, turn)
 
-			results[i] = a.executeTool(ctx, tc)
+		if !a.emitToolResults(ctx, out, toolCalls, results) {
+			return
 		}
 
-		// Emit results and append messages in original order.
-		for i, tc := range toolCalls {
-			a.messages = append(a.messages, llm.Message{
-				Role:       llm.RoleTool,
-				Content:    results[i].Content,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
+		if stopped {
+			emit(ctx, out, Event{
+				Type:     EventDone,
+				ModelID:  model.ID,
+				Metadata: map[string]any{"stopped_by_user": true},
 			})
 
-			if !emit(ctx, out, Event{
-				Type:     EventToolResult,
-				ToolID:   tc.ID,
-				ToolName: tc.Name,
-				Result:   results[i].Content,
-				IsError:  results[i].IsError,
-				Metadata: results[i].Metadata,
-			}) {
-				return
-			}
+			return
 		}
 	}
 
 	emit(ctx, out, Event{Type: EventError, Err: fmt.Errorf("%w: %d", errMaxTurnsExceeded, a.cfg.MaxTurns)})
+}
+
+// executeEffectfulTools runs the effectful tools in toolCalls sequentially.
+// If the user picks ConfirmStop, remaining effectful calls in the same turn
+// are marked stopped without re-prompting. Returns true when a stop occurred.
+func (a *Agent) executeEffectfulTools(
+	ctx context.Context, toolCalls []llm.ToolCall, results []ToolResult, turn int,
+) bool {
+	stopped := false
+	for i, tc := range toolCalls {
+		if !isEffectfulTool(tc.Name) {
+			continue
+		}
+
+		if stopped {
+			results[i] = stoppedToolResult(tc.Name)
+
+			continue
+		}
+
+		results[i] = a.executeTool(ctx, tc, turn)
+		if userStopped(results[i]) {
+			stopped = true
+		}
+	}
+
+	return stopped
+}
+
+// emitToolResults appends each tool_result message to history and emits an
+// EventToolResult per call, in original order. Returns false if the context
+// was cancelled mid-emit.
+func (a *Agent) emitToolResults(
+	ctx context.Context, out chan<- Event, toolCalls []llm.ToolCall, results []ToolResult,
+) bool {
+	for i, tc := range toolCalls {
+		a.messages = append(a.messages, llm.Message{
+			Role:       llm.RoleTool,
+			Content:    results[i].Content,
+			ToolCallID: tc.ID,
+			ToolName:   tc.Name,
+		})
+
+		if !emit(ctx, out, Event{
+			Type:     EventToolResult,
+			ToolID:   tc.ID,
+			ToolName: tc.Name,
+			Result:   results[i].Content,
+			IsError:  results[i].IsError,
+			Metadata: results[i].Metadata,
+		}) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func buildTurnMetadata(src map[string]any, turn int) map[string]any {
+	meta := make(map[string]any)
+	maps.Copy(meta, src)
+	meta["turn"] = turn
+	return meta
 }
 
 func (a *Agent) requestOverrides(opts RunOptions) (llm.Model, int) {
@@ -170,7 +223,7 @@ func (a *Agent) findTool(name string) *Tool {
 	return nil
 }
 
-func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall) ToolResult {
+func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall, turn int) ToolResult {
 	tool := a.findTool(tc.Name)
 	if tool == nil {
 		return ToolResult{Content: fmt.Sprintf("Unknown tool: %q", tc.Name), IsError: true}
@@ -186,12 +239,58 @@ func (a *Agent) executeTool(ctx context.Context, tc llm.ToolCall) ToolResult {
 		}
 	}
 
+	if a.cfg.EffectfulToolConfirm != nil && isEffectfulTool(tc.Name) {
+		decision, err := a.cfg.EffectfulToolConfirm(ctx, ConfirmRequest{
+			Name: tc.Name,
+			Args: string(tc.Args),
+			Turn: turn,
+		})
+		if err != nil {
+			return ToolResult{Content: fmt.Sprintf("Confirmation error: %v", err), IsError: true}
+		}
+
+		switch decision {
+		case ConfirmAllow:
+			// fall through to execute
+		case ConfirmSkip:
+			return ToolResult{
+				Content: fmt.Sprintf("[skipped] %s was not executed", tc.Name),
+				Metadata: map[string]any{
+					"skipped": true,
+					"tool":    tc.Name,
+				},
+			}
+		case ConfirmStop:
+			return stoppedToolResult(tc.Name)
+		}
+	}
+
 	result, err := tool.Execute(ctx, tc.Args)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
 
 	return result
+}
+
+func stoppedToolResult(name string) ToolResult {
+	return ToolResult{
+		Content: fmt.Sprintf("[stopped] %s was not executed (run halted by user)", name),
+		Metadata: map[string]any{
+			"user_stopped": true,
+			"tool":         name,
+		},
+	}
+}
+
+func userStopped(r ToolResult) bool {
+	if r.Metadata == nil {
+		return false
+	}
+
+	stopped, ok := r.Metadata["user_stopped"].(bool)
+
+	return ok && stopped
 }
 
 func isEffectfulTool(name string) bool {

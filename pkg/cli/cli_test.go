@@ -546,6 +546,29 @@ func TestRun_InteractiveListsAndResumesSession(t *testing.T) {
 	assert.Empty(t, errOut.String())
 }
 
+func textEventsWithUsage(text string, usage llm.Usage) []llm.StreamEvent {
+	return []llm.StreamEvent{
+		{Text: text},
+		{Done: &llm.Done{StopReason: "stop", Usage: usage}},
+	}
+}
+
+func TestRun_PipedPromptPrintsTokenSummary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	client := &mockClient{events: textEventsWithUsage("hello", llm.Usage{TotalTokens: 42})}
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
+	var out, errOut bytes.Buffer
+	c := New(ag, testConfig(), session.New(), WithIO(strings.NewReader("say hi"), &out, &errOut, false))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "[Tokens: 42 this turn / 42 session]")
+	assert.Empty(t, errOut.String())
+}
+
 func writeCLITestSkill(t *testing.T, root string, dirName string, frontmatter string, body string) {
 	t.Helper()
 

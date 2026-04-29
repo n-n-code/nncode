@@ -142,6 +142,39 @@ func TestAgent_TextOnly(t *testing.T) {
 	require.GreaterOrEqual(t, len(mock.LastRequest.Messages), 1)
 	assert.Equal(t, llm.RoleSystem, mock.LastRequest.Messages[0].Role)
 	assert.Equal(t, "be helpful", mock.LastRequest.Messages[0].Content)
+
+	// Verify ModelID is present on lifecycle events.
+	turnStarts := findType(events, EventTurnStart)
+	require.Len(t, turnStarts, 1)
+	assert.Equal(t, "test", turnStarts[0].ModelID)
+
+	turnEnds := findType(events, EventTurnEnd)
+	require.Len(t, turnEnds, 1)
+	assert.Equal(t, "test", turnEnds[0].ModelID)
+	assert.Equal(t, 10, turnEnds[0].Usage.TotalTokens)
+
+	dones := findType(events, EventDone)
+	require.Len(t, dones, 1)
+	assert.Equal(t, "test", dones[0].ModelID)
+
+	// Verify usage and model are persisted on the assistant message.
+	assert.Equal(t, 10, msgs[1].Usage.TotalTokens)
+	assert.Equal(t, "test", msgs[1].Model)
+	assert.Equal(t, 1, msgs[1].Metadata["turn"])
+}
+
+func TestAgent_RunWithOptionsMetadataPersisted(t *testing.T) {
+	mock := &mockClient{Fallback: scriptText("ok")}
+	ag := New(Config{Model: llm.Model{ID: "test"}, Client: mock}, "")
+
+	drain(ag.RunWithOptions(context.Background(), "do", RunOptions{
+		Metadata: map[string]any{"custom_key": "custom_value"},
+	}))
+
+	msgs := ag.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "custom_value", msgs[1].Metadata["custom_key"])
+	assert.Equal(t, 1, msgs[1].Metadata["turn"])
 }
 
 func TestAgent_ToolCall_ThenFinalText(t *testing.T) {
@@ -480,7 +513,8 @@ func TestAgent_RunWithOptionsOverridesRequestOnly(t *testing.T) {
 		MaxTokens: 100,
 	}, "")
 
-	drain(agent.RunWithOptions(context.Background(), "do", RunOptions{
+	// Verify overridden model ID appears on events and the assistant message.
+	events := drain(agent.RunWithOptions(context.Background(), "do", RunOptions{
 		Model:                llm.Model{ID: "override", BaseURL: "http://override.example/v1"},
 		MaxTokens:            42,
 		ScopedSystemMessages: nil,
@@ -490,6 +524,117 @@ func TestAgent_RunWithOptionsOverridesRequestOnly(t *testing.T) {
 	assert.Equal(t, "http://override.example/v1", mock.LastRequest.Model.BaseURL)
 	assert.Equal(t, 42, mock.LastRequest.MaxTokens)
 	assert.Equal(t, "base", agent.Model().ID)
+
+	turnEnds := findType(events, EventTurnEnd)
+	require.Len(t, turnEnds, 1)
+	assert.Equal(t, "override", turnEnds[0].ModelID)
+	msgs := agent.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "override", msgs[1].Model)
+}
+
+func TestAgent_ConfirmStopHaltsCleanly(t *testing.T) {
+	bashCall := llm.ToolCall{ID: "c1", Name: "bash", Args: json.RawMessage(`{"command":"rm -rf /"}`)}
+	writeCall := llm.ToolCall{ID: "c2", Name: "write", Args: json.RawMessage(`{"path":"x"}`)}
+
+	mock := &mockClient{
+		Scripts: [][]llm.StreamEvent{{
+			{ToolStart: &bashCall},
+			{ToolEnd: &bashCall},
+			{ToolStart: &writeCall},
+			{ToolEnd: &writeCall},
+			{Done: &llm.Done{StopReason: "tool_calls"}},
+		}},
+	}
+
+	bashTool := Tool{Name: "bash", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			t.Fatal("bash should not be executed when user picks stop")
+			return ToolResult{}, nil
+		}}
+	writeTool := Tool{Name: "write", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			t.Fatal("write should not be executed once stop is selected")
+			return ToolResult{}, nil
+		}}
+
+	confirmCalls := 0
+	ag := New(Config{
+		Model: llm.Model{ID: "test"}, Client: mock, Tools: []Tool{bashTool, writeTool},
+		EffectfulToolConfirm: func(ctx context.Context, req ConfirmRequest) (ConfirmDecision, error) {
+			confirmCalls++
+			return ConfirmStop, nil
+		},
+	}, "")
+
+	events := drain(ag.Run(context.Background(), "go"))
+
+	assert.Equal(t, 1, confirmCalls, "stop should short-circuit; second tool must not re-prompt")
+	assert.Equal(t, 1, mock.Calls, "no further LLM turns after user stop")
+
+	results := findType(events, EventToolResult)
+	require.Len(t, results, 2)
+	for _, r := range results {
+		assert.Contains(t, r.Result, "[stopped]")
+		assert.Equal(t, true, r.Metadata["user_stopped"])
+	}
+
+	dones := findType(events, EventDone)
+	require.Len(t, dones, 1)
+	assert.Equal(t, true, dones[0].Metadata["stopped_by_user"])
+
+	errs := findType(events, EventError)
+	assert.Empty(t, errs, "user-stop is a clean halt, not an error")
+
+	// Conversation state stays valid: every tool_use has a matching tool_result.
+	var assistantToolCalls, toolResultMsgs int
+	for _, msg := range ag.Messages() {
+		if msg.Role == llm.RoleAssistant {
+			assistantToolCalls += len(msg.ToolCalls)
+		}
+		if msg.Role == llm.RoleTool {
+			toolResultMsgs++
+		}
+	}
+	assert.Equal(t, assistantToolCalls, toolResultMsgs)
+}
+
+func TestAgent_ConfirmSkipContinues(t *testing.T) {
+	bashCall := llm.ToolCall{ID: "c1", Name: "bash", Args: json.RawMessage(`{"command":"ls"}`)}
+
+	mock := &mockClient{
+		Scripts: [][]llm.StreamEvent{
+			{
+				{ToolStart: &bashCall},
+				{ToolEnd: &bashCall},
+				{Done: &llm.Done{StopReason: "tool_calls"}},
+			},
+			scriptText("understood"),
+		},
+	}
+
+	executed := 0
+	bashTool := Tool{Name: "bash", Parameters: "{}",
+		Execute: func(ctx context.Context, args json.RawMessage) (ToolResult, error) {
+			executed++
+			return ToolResult{Content: "ok"}, nil
+		}}
+
+	ag := New(Config{
+		Model: llm.Model{ID: "test"}, Client: mock, Tools: []Tool{bashTool},
+		EffectfulToolConfirm: func(ctx context.Context, req ConfirmRequest) (ConfirmDecision, error) {
+			return ConfirmSkip, nil
+		},
+	}, "")
+
+	events := drain(ag.Run(context.Background(), "go"))
+
+	assert.Equal(t, 0, executed, "skip must not invoke the tool")
+	assert.Equal(t, 2, mock.Calls, "skip continues the loop to the next turn")
+
+	results := findType(events, EventToolResult)
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0].Result, "[skipped]")
 }
 
 func TestAgent_RunWithOptionsScopedSystemMessagesAreNotPersisted(t *testing.T) {

@@ -71,6 +71,7 @@ type Event struct {
 	Turn     int   // EventTurn*
 	Usage    llm.Usage
 
+	ModelID             string // EventTurnStart, EventTurnEnd, EventDone
 	LoopName            string // EventLoop*
 	LoopPath            string // EventLoopStart
 	LoopIteration       int    // EventLoopIterationStart, EventLoopExitDecision

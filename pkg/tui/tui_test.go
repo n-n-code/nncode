@@ -461,3 +461,118 @@ func containsMessageText(messages []msgItem, text string) bool {
 
 	return false
 }
+
+func TestComputeTokenStatsAggregatesFromMessages(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.agent.SetMessages([]llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{TotalTokens: 10}, Model: "test"},
+		{Role: llm.RoleUser, Content: "again"},
+		{Role: llm.RoleAssistant, Content: "ok", Usage: llm.Usage{TotalTokens: 25}, Model: "other"},
+	})
+
+	stats := m.computeTokenStats()
+	assert.Equal(t, 25, stats.lastTurn)
+	assert.Equal(t, 35, stats.sessionTotal)
+	assert.Equal(t, map[string]int{"test": 10, "other": 25}, stats.byModel)
+}
+
+func TestStatusViewContainsTokenCounters(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.agent.SetMessages([]llm.Message{
+		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{TotalTokens: 1500}, Model: "test"},
+	})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+
+	view := m.View()
+	assert.Contains(t, view, "TOKENS")
+	assert.Contains(t, view, "1.5k")
+}
+
+func TestConfirmationOverlayKeyDecisions(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+		want agent.ConfirmDecision
+	}{
+		{"y allows", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}, agent.ConfirmAllow},
+		{"n stops", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}, agent.ConfirmStop},
+		{"q skips", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}, agent.ConfirmSkip},
+		{"esc skips", tea.KeyMsg{Type: tea.KeyEsc}, agent.ConfirmSkip},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(&mockClient{})
+			m.width = 80
+			m.height = 24
+			m.recalcLayout()
+
+			resp := make(chan agent.ConfirmDecision, 1)
+			m.pendingConfirm = &toolConfirmReq{Name: "bash", Args: `{"command":"ls"}`, Turn: 1, Resp: resp}
+			m.overlay = overlayConfirm
+
+			updated, _ := m.handleOverlayKey(tc.key)
+			assert.Equal(t, overlayNone, updated.overlay)
+			assert.Nil(t, updated.pendingConfirm)
+			assert.Equal(t, tc.want, <-resp)
+		})
+	}
+}
+
+func TestConfirmationOverlayRendersToolBoxAndChips(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.width = 100
+	m.height = 30
+	m.recalcLayout()
+
+	resp := make(chan agent.ConfirmDecision, 1)
+	t.Cleanup(func() { close(resp) })
+	m.pendingConfirm = &toolConfirmReq{
+		Name: "bash",
+		Args: `{"command":"mkdir -p testproject"}`,
+		Turn: 3,
+		Resp: resp,
+	}
+	m.overlay = overlayConfirm
+
+	view := m.overlayView()
+	assert.Contains(t, view, "Confirm?")
+	assert.Contains(t, view, "turn 3")
+	assert.Contains(t, view, "$ mkdir -p testproject", "bash command should be pretty-printed, not raw JSON")
+	assert.Contains(t, view, "[y]")
+	assert.Contains(t, view, "[n]")
+	assert.Contains(t, view, "[esc/q]")
+	assert.Contains(t, view, "Yes, allow")
+	assert.Contains(t, view, "No, stop")
+	assert.Contains(t, view, "Find another way")
+}
+
+func TestSessionOverlayShowsTokenBreakdown(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.agent.SetMessages([]llm.Message{
+		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{TotalTokens: 100}, Model: "m1", Metadata: map[string]any{"turn": 1}},
+		{Role: llm.RoleAssistant, Content: "ok", Usage: llm.Usage{TotalTokens: 200}, Model: "m2", Metadata: map[string]any{"turn": 2, "loop_name": "review", "loop_node_id": "prompt"}},
+	})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+	m.openSessionOverlay()
+
+	// Verify overlay items contain all data (rendered view may scroll).
+	items := strings.Join(m.overlayItems, "\n")
+	assert.Contains(t, items, "Tokens (last turn): 200")
+	assert.Contains(t, items, "Tokens (session):   300")
+	assert.Contains(t, items, "m1: 100")
+	assert.Contains(t, items, "m2: 200")
+	assert.Contains(t, items, "turn 1: 100 tokens (m1)")
+	assert.Contains(t, items, "turn 2: 200 tokens (m2)")
+	assert.Contains(t, items, "[review node=prompt]")
+
+	// Verify visible portion of the overlay renders at least the header info.
+	view := m.overlayView()
+	assert.Contains(t, view, "Tokens (last turn): 200")
+	assert.Contains(t, view, "Per model:")
+}

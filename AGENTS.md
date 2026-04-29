@@ -4,7 +4,7 @@
 
 nncode is a minimal coding agent written in Go. It runs an agent loop: prompt -> LLM -> tool calls -> execute -> repeat. It has OpenAI-compatible model support, JSONL sessions, local Agent Skills, and a small synchronous tool set.
 
-Keep the scope tight: no sub-agents, no MCP, no permission UI. It is a CLI that streams responses to stdout, with an optional Bubble Tea TUI for interactive terminal sessions.
+Keep the scope tight. It is a CLI that streams responses to stdout, with an optional Bubble Tea TUI for interactive terminal sessions.
 
 > **Design reference:** For visual identity, color system, typography, and CRT styling rules, see [`DESIGN.md`](DESIGN.md). Agents working on TUI, branding, or terminal visuals should read it before making changes.
 
@@ -146,5 +146,4 @@ When using nncode itself as the patch author:
 - Do not add runtime dependencies without asking
 - The TUI lives in `pkg/tui/` and is the default for interactive terminal sessions; use `-no-tui` to force the plain CLI
 - TUI mid-turn cancellation: when the agent is running, `ctrl+c` cancels the current turn instead of quitting; a second `ctrl+c` while idle exits the app
-- Do not add MCP, sub-agents, or plan mode — those are explicitly out of scope
 - Do not modify `internal/llm/openai.go` to support non-OpenAI-compatible APIs — use a new provider instead
