@@ -13,6 +13,8 @@ import (
 	"nncode/internal/agent"
 	"nncode/internal/agentloop"
 	"nncode/internal/config"
+	"nncode/internal/contextprint"
+	"nncode/internal/contextwindow"
 	"nncode/internal/doctor"
 	"nncode/internal/llm"
 	"nncode/internal/projectctx"
@@ -34,15 +36,17 @@ Be concise. When the task is done, stop.`
 const defaultDoctorTimeout = 10 * time.Second
 
 var (
-	errUnexpectedArg       = errors.New("unexpected argument")
-	errUnexpectedDoctorArg = errors.New("unexpected doctor argument")
-	errUnexpectedLoopArg   = errors.New("unexpected loop argument")
-	errLoopArgRequired     = errors.New("loop argument required")
-	errLoopCommandRequired = errors.New("loop subcommand is required")
-	errUnknownLoopCommand  = errors.New("unknown loop subcommand")
-	errModelNotConfigured  = errors.New("model is not configured")
-	errDoctorFoundProblems = errors.New("doctor found problems")
-	errLoopRequiresPiped   = errors.New("-loop requires piped stdin; use /loop in interactive mode")
+	errUnexpectedArg        = errors.New("unexpected argument")
+	errUnexpectedDoctorArg  = errors.New("unexpected doctor argument")
+	errUnexpectedLoopArg    = errors.New("unexpected loop argument")
+	errUnexpectedSessionArg = errors.New("unexpected session argument")
+	errSessionArgRequired   = errors.New("session argument required")
+	errLoopArgRequired      = errors.New("loop argument required")
+	errLoopCommandRequired  = errors.New("loop subcommand is required")
+	errUnknownLoopCommand   = errors.New("unknown loop subcommand")
+	errModelNotConfigured   = errors.New("model is not configured")
+	errDoctorFoundProblems  = errors.New("doctor found problems")
+	errLoopRequiresPiped    = errors.New("-loop requires piped stdin; use /loop in interactive mode")
 )
 
 func main() {
@@ -66,6 +70,10 @@ func runWithArgs(args []string) error {
 		return runLoopCommand(args[1:])
 	}
 
+	if len(args) > 0 && args[0] == "session" {
+		return runSessionCommand(args[1:])
+	}
+
 	flags := flag.NewFlagSet("nncode", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	modelFlag := flags.String("model", "", "model name to use (overrides default_model from config)")
@@ -76,6 +84,12 @@ func runWithArgs(args []string) error {
 
 	strictFlag := flags.Bool("strict", false,
 		"in piped mode, exit non-zero if the agent produces no response and no successful effectful tool call")
+
+	confirmFlag := flags.Bool("confirm", false,
+		"in piped mode, skip effectful tools and require -no-confirm to execute them")
+
+	noConfirmFlag := flags.Bool("no-confirm", false,
+		"in piped mode, explicitly allow effectful tools without confirmation")
 
 	dryRunFlag := flags.Bool("dry-run", false,
 		"preview effectful tool calls without executing them")
@@ -113,7 +127,8 @@ func runWithArgs(args []string) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	return runAgent(cfg, *modelFlag, *loopFlag, *resumeFlag, *strictFlag, *dryRunFlag, *noTUIFlag)
+	return runAgent(cfg, *modelFlag, *loopFlag, *resumeFlag, *strictFlag,
+		*confirmFlag, *noConfirmFlag, *dryRunFlag, *noTUIFlag)
 }
 
 func prepareConfig(modelFlag string) (*config.Config, error) {
@@ -155,6 +170,86 @@ func runLoopCommand(args []string) error {
 	default:
 		return fmt.Errorf("%w: %q", errUnknownLoopCommand, args[0])
 	}
+}
+
+func runSessionCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("%w: session subcommand required (show, export, changes)", errSessionArgRequired)
+	}
+
+	switch args[0] {
+	case "show":
+		return runSessionShowCommand(args[1:])
+	case "export":
+		return runSessionExportCommand(args[1:])
+	case "changes":
+		return runSessionChangesCommand(args[1:])
+	default:
+		return fmt.Errorf("%w: %q", errUnexpectedSessionArg, args[0])
+	}
+}
+
+func loadSessionFromArg(arg string) (*session.Session, error) {
+	path, err := session.Resolve(arg)
+	if err != nil {
+		return nil, fmt.Errorf("resolve session: %w", err)
+	}
+
+	sess, err := session.Load(path)
+	if err != nil {
+		return nil, fmt.Errorf("load session: %w", err)
+	}
+
+	return sess, nil
+}
+
+func runSessionShowCommand(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("%w: session show requires exactly one session ID or path", errSessionArgRequired)
+	}
+
+	sess, err := loadSessionFromArg(args[0])
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "Session: %s\n", sess.ID)
+	fmt.Fprintf(os.Stdout, "Messages: %d\n\n", len(sess.Messages))
+	fmt.Fprintln(os.Stdout, contextprint.Format("", sess.Messages))
+
+	return nil
+}
+
+func runSessionExportCommand(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("%w: session export requires exactly one session ID or path", errSessionArgRequired)
+	}
+
+	sess, err := loadSessionFromArg(args[0])
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprint(os.Stdout, session.ExportMarkdown(sess))
+
+	return nil
+}
+
+func runSessionChangesCommand(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("%w: session changes requires exactly one session ID or path", errSessionArgRequired)
+	}
+
+	sess, err := loadSessionFromArg(args[0])
+	if err != nil {
+		return err
+	}
+
+	changes := session.ExtractChanges(sess.Messages)
+	fmt.Fprint(os.Stdout, session.FormatChanges(changes))
+	fmt.Fprintln(os.Stdout)
+
+	return nil
 }
 
 func runLoopListCommand(args []string) error {
@@ -237,7 +332,7 @@ func runLoopRunCommand(args []string) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	return runAgent(cfg, *modelFlag, flags.Arg(0), *resumeFlag, *strictFlag, *dryRunFlag, *noTUIFlag)
+	return runAgent(cfg, *modelFlag, flags.Arg(0), *resumeFlag, *strictFlag, false, false, *dryRunFlag, *noTUIFlag)
 }
 
 func loadMergedConfig() (*config.Config, error) {
@@ -262,6 +357,8 @@ func runAgent(
 	loopRef string,
 	resumeRef string,
 	strictPiped bool,
+	confirm bool,
+	noConfirm bool,
 	dryRun bool,
 	noTUI bool,
 ) error {
@@ -281,6 +378,14 @@ func runAgent(
 	}
 
 	model := buildModel(modelName, modelCfg)
+	initialWindow := contextwindow.Configured(modelCfg)
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	contextResolver := func(ctx context.Context) contextwindow.Window {
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, contextwindow.DefaultResolveTimeout)
+		defer resolveCancel()
+
+		return contextwindow.Resolver{APIKey: apiKey}.Resolve(resolveCtx, modelCfg, model.ID)
+	}
 
 	skillRegistry := skills.Discover(skills.DiscoverOptions{})
 	skillActivator := skills.NewActivator(skillRegistry)
@@ -306,7 +411,7 @@ func runAgent(
 	ag := agent.New(agent.Config{
 		Model:     model,
 		Client:    llm.NewOpenAIClient(),
-		APIKey:    os.Getenv("OPENAI_API_KEY"),
+		APIKey:    apiKey,
 		Tools:     buildTools(cfg.Tools, skillActivator),
 		MaxTokens: modelCfg.MaxTokens,
 		DryRun:    dryRun,
@@ -327,7 +432,7 @@ func runAgent(
 	useTUI := !noTUI && isTerminal
 
 	if useTUI {
-		err = tui.Run(ag, cfg, sess, skillRegistry, skillActivator)
+		err = tui.Run(ag, cfg, sess, skillRegistry, skillActivator, initialWindow, contextResolver)
 		if err != nil {
 			return fmt.Errorf("tui run: %w", err)
 		}
@@ -337,8 +442,11 @@ func runAgent(
 
 	cliInst := cli.New(ag, cfg, sess,
 		cli.WithSkills(skillRegistry, skillActivator),
+		cli.WithContextWindow(initialWindow),
+		cli.WithContextResolver(contextResolver),
 		cli.WithLoopRef(loopRef),
-		cli.WithStrictPiped(strictPiped))
+		cli.WithStrictPiped(strictPiped),
+		cli.WithConfirm(confirm, noConfirm))
 
 	err = cliInst.Run()
 	if err != nil {

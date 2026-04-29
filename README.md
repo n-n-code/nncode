@@ -6,6 +6,13 @@ A minimal coding agent built in Go. Completely under your control — from syste
 
 Stripped down to essentials: an agent loop, a few tools, and a CLI. No sub-agents, no MCP, no permission popups. Just prompt → LLM → tools → repeat.
 
+## Why nncode?
+
+- **Deploy anywhere.** Single static binary, zero runtime dependencies. Drop it into a CI image, a container, or an air-gapped box and it just works.
+- **Audit everything.** Every turn is a JSONL session on disk. Every tool call is recorded. You can diff sessions, grep them, or replay them.
+- **Small surface, small risk.** The tool set is tiny and every effectful action is confirmable. The codebase is small enough to read in an afternoon.
+- **Not chasing features.** No git integration, no web search, no MCP. We ship deployability and auditability instead.
+
 ## Features
 
 - **LLM providers**: OpenAI Chat Completions + OpenAI-compatible local servers (Ollama, LM Studio, vLLM)
@@ -93,7 +100,7 @@ nncode doctor -timeout 30s
 nncode -check             # shorthand for non-live diagnostics
 ```
 
-`doctor -live` sends a tiny prompt to the selected model. Without `-live`, diagnostics stay local and offline. Doctor also checks Agent Skills and Agent Loops discovery and reports those issues as warnings, not startup failures.
+`doctor -live` sends a tiny prompt to the selected model and also tries live context-window metadata. Without `-live`, diagnostics stay local and offline. Doctor also checks Agent Skills and Agent Loops discovery and reports those issues as warnings, not startup failures.
 
 ### Built-in commands
 
@@ -103,6 +110,8 @@ nncode -check             # shorthand for non-live diagnostics
 | `/quit` | Exit the agent |
 | `/exit` | Alias for `/quit` |
 | `/reset` | Reset the current session |
+| `/context -print` | Print the stored context: startup system prompt plus saved conversation messages; loop-scoped system messages are not stored |
+| `/context -reset` | Reset stored conversation context and activated skill state |
 | `/session` | Show current session info |
 | `/sessions` | List saved sessions |
 | `/resume <id\|path>` | Load a saved session into the current conversation |
@@ -141,7 +150,7 @@ The named model must have an entry in the `models` map (a local-server entry nee
     "gpt-4o": { "api_type": "openai-completions", "provider": "openai" },
     "gpt-4o-mini": { "api_type": "openai-completions", "provider": "openai" },
     "o3": { "api_type": "openai-completions", "provider": "openai" },
-    "llama3": { "api_type": "openai-completions", "provider": "ollama", "base_url": "http://127.0.0.1:8033/v1" }
+    "llama3": { "api_type": "openai-completions", "provider": "ollama", "base_url": "http://127.0.0.1:8033/v1", "context_window": 128000 }
   },
   "tools": {
     "disabled": [],
@@ -165,11 +174,15 @@ The config map key is the name you pass to `-model`. If the server uses a differ
       "api_type": "openai-completions",
       "provider": "llamacpp",
       "base_url": "http://127.0.0.1:8033/v1",
-      "max_tokens": 4096
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "context_probe": "auto"
     }
   }
 }
 ```
+
+`context_window` is optional. It is used as a manual fallback for the `CTX used/free` display when live provider metadata does not expose a context size. `context_probe` controls live metadata probing: `"auto"` (default) probes loopback URLs and `"llamacpp"` / `"llama.cpp"` providers, `"llamacpp"` forces llama.cpp probing for that model, and `"off"` disables live probing. When probing is enabled, nncode first tries llama.cpp metadata from `<server-root>/props?autoload=false`, then llama.cpp's nonstandard `/v1/models` `meta.n_ctx_train`. The TUI starts with any configured `context_window` and refreshes live metadata in the background; non-interactive runs resolve it before printing the final `CTX` summary. Standard OpenAI model objects do not expose context size, so cloud models show unknown unless `context_window` is configured.
 
 If you pass `-model <unknown-name>` and exactly one configured model has a non-empty `base_url`, nncode automatically clones that entry for the unknown name. This makes it convenient to use arbitrary model names with local endpoints without pre-declaring every name in config.
 

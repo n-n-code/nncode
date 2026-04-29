@@ -14,6 +14,7 @@ import (
 
 	"nncode/internal/agent"
 	"nncode/internal/config"
+	"nncode/internal/contextwindow"
 	"nncode/internal/llm"
 	"nncode/internal/session"
 )
@@ -69,7 +70,7 @@ func testConfig() *config.Config {
 
 func newTestModel(client llm.Client) *model {
 	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
-	return newModel(ag, testConfig(), session.New(), nil, nil)
+	return newModel(ag, testConfig(), session.New(), nil, nil, contextwindow.Window{}, nil)
 }
 
 func TestNewModelInitialState(t *testing.T) {
@@ -90,7 +91,7 @@ func TestSendUserMessageStreamsText(t *testing.T) {
 	// Simulate typing and sending.
 	m.textarea.SetValue("say hi")
 	updated, _ := m.sendInput()
-	m = updated.(*model)
+	m = updated
 	require.True(t, m.running)
 	require.Len(t, m.messages, 1)
 	assert.Equal(t, kindUser, m.messages[0].Kind)
@@ -102,8 +103,8 @@ func TestSendUserMessageStreamsText(t *testing.T) {
 		msg := nextEventCmd(m.eventCh)()
 		require.IsType(t, agentEventMsg{}, msg)
 		ev := msg.(agentEventMsg).Event
-		updated, _ = m.Update(msg)
-		m = updated.(*model)
+		teaModel, _ := m.Update(msg)
+		m = teaModel.(*model)
 		if ev.Type == agent.EventText {
 			textEv = ev
 			break
@@ -126,15 +127,62 @@ func TestSlashCommandReset(t *testing.T) {
 	m.agent.SetMessages([]llm.Message{{Role: llm.RoleUser, Content: "prior"}})
 
 	updated, _ := m.handleSlashCommand("/reset")
-	m = updated.(*model)
+	m = updated
 	assert.Empty(t, m.messages)
 	assert.Empty(t, m.agent.Messages())
+}
+
+func TestSlashCommandContextPrintOpensOverlay(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.agent.SetMessages([]llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{
+			Role:    llm.RoleAssistant,
+			Content: "I will read it",
+			ToolCalls: []llm.ToolCall{
+				{ID: "call-1", Name: "read", Args: []byte(`{"path":"README.md"}`)},
+			},
+		},
+		{Role: llm.RoleTool, Content: "contents", ToolCallID: "call-1", ToolName: "read"},
+	})
+	m.width = 100
+	m.height = 30
+	m.recalcLayout()
+
+	updated, _ := m.handleSlashCommand("/context -print")
+	m = updated
+
+	assert.Equal(t, overlayContext, m.overlay)
+	items := strings.Join(m.overlayItems, "\n")
+	assert.Contains(t, items, "Loop-scoped system messages")
+	assert.Contains(t, items, "[system]")
+	assert.Contains(t, items, "system")
+	assert.Contains(t, items, "[user]")
+	assert.Contains(t, items, "hello")
+	assert.Contains(t, items, "[assistant]")
+	assert.Contains(t, items, "tool_calls:")
+	assert.Contains(t, items, "id=call-1 name=read")
+	assert.Contains(t, m.overlayView(), "Context")
+}
+
+func TestSlashCommandContextResetClearsMessagesAndSession(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.messages = []msgItem{{Kind: kindUser, Text: "prior"}}
+	m.agent.SetMessages([]llm.Message{{Role: llm.RoleUser, Content: "prior"}})
+	m.sess.Messages = m.agent.Messages()
+
+	updated, _ := m.handleSlashCommand("/context -reset")
+	m = updated
+
+	assert.Empty(t, m.messages)
+	assert.Empty(t, m.agent.Messages())
+	assert.Empty(t, m.sess.Messages)
 }
 
 func TestSlashCommandHelpOpensOverlay(t *testing.T) {
 	m := newTestModel(&mockClient{})
 	updated, _ := m.handleSlashCommand("/help")
-	m = updated.(*model)
+	m = updated
 	assert.Equal(t, overlayHelp, m.overlay)
 	assert.NotEmpty(t, m.overlayItems)
 }
@@ -158,7 +206,7 @@ func TestSlashCommandLoopsOpensOverlay(t *testing.T) {
 	m.height = 30
 	m.recalcLayout()
 	updated, _ := m.handleSlashCommand("/loops")
-	m = updated.(*model)
+	m = updated
 	assert.Equal(t, overlayLoops, m.overlay)
 	items := strings.Join(m.overlayItems, "\n")
 	assert.Contains(t, items, "run-me")
@@ -190,7 +238,7 @@ func TestLoopsOverlayEnterRunsSelectedLoop(t *testing.T) {
 	}}
 	m := newTestModel(client)
 	updated, _ := m.handleSlashCommand("/loops")
-	m = updated.(*model)
+	m = updated
 
 	next, cmd := m.selectOverlayItem()
 	m = next
@@ -228,7 +276,7 @@ func TestSlashCommandLoopValidate(t *testing.T) {
 
 	m := newTestModel(&mockClient{})
 	updated, _ := m.handleSlashCommand("/loop-validate review")
-	m = updated.(*model)
+	m = updated
 	require.Len(t, m.messages, 1)
 	assert.Equal(t, kindAssistant, m.messages[0].Kind)
 	assert.Contains(t, m.messages[0].Text, "Agent Loop \"review\" is valid")
@@ -256,7 +304,7 @@ func TestSlashCommandLoopRuns(t *testing.T) {
 	}}
 	m := newTestModel(client)
 	updated, _ := m.handleSlashCommand("/loop review ship it")
-	m = updated.(*model)
+	m = updated
 
 	require.True(t, m.running)
 	require.Len(t, m.messages, 1)
@@ -265,8 +313,8 @@ func TestSlashCommandLoopRuns(t *testing.T) {
 
 	for {
 		msg := nextEventCmd(m.eventCh)()
-		updated, _ = m.Update(msg)
-		m = updated.(*model)
+		teaModel, _ := m.Update(msg)
+		m = teaModel.(*model)
 		if _, ok := msg.(agentDoneMsg); ok {
 			break
 		}
@@ -285,7 +333,7 @@ func TestSlashCommandSessionUsesSessionOverlay(t *testing.T) {
 	m.recalcLayout()
 
 	updated, _ := m.handleSlashCommand("/session")
-	m = updated.(*model)
+	m = updated
 	assert.Equal(t, overlaySessionInfo, m.overlay)
 	assert.Contains(t, m.overlayView(), "Session")
 }
@@ -293,7 +341,7 @@ func TestSlashCommandSessionUsesSessionOverlay(t *testing.T) {
 func TestSlashCommandUnknown(t *testing.T) {
 	m := newTestModel(&mockClient{})
 	updated, _ := m.handleSlashCommand("/unknown")
-	m = updated.(*model)
+	m = updated
 	require.Len(t, m.messages, 1)
 	assert.Equal(t, kindError, m.messages[0].Kind)
 	assert.Contains(t, m.messages[0].Text, "Unknown command")
@@ -363,7 +411,7 @@ func TestViewRowsFillTerminalWidth(t *testing.T) {
 func TestOverlayViewRendersHelp(t *testing.T) {
 	m := newTestModel(&mockClient{})
 	m.width = 80
-	m.height = 24
+	m.height = 32
 	m.recalcLayout()
 	m.openHelpOverlay()
 
@@ -406,7 +454,7 @@ func TestSaveSessionUsesAgentMessages(t *testing.T) {
 
 	m.textarea.SetValue("hello")
 	updated, _ := m.sendInput()
-	m = updated.(*model)
+	m = updated
 
 	// Drain events until done.
 	for {
@@ -414,8 +462,8 @@ func TestSaveSessionUsesAgentMessages(t *testing.T) {
 		if msg == nil {
 			break
 		}
-		updated, _ = m.Update(msg)
-		m = updated.(*model)
+		teaModel, _ := m.Update(msg)
+		m = teaModel.(*model)
 		if _, ok := msg.(agentDoneMsg); ok {
 			break
 		}
@@ -462,21 +510,6 @@ func containsMessageText(messages []msgItem, text string) bool {
 	return false
 }
 
-func TestComputeTokenStatsAggregatesFromMessages(t *testing.T) {
-	m := newTestModel(&mockClient{})
-	m.agent.SetMessages([]llm.Message{
-		{Role: llm.RoleUser, Content: "hello"},
-		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{TotalTokens: 10}, Model: "test"},
-		{Role: llm.RoleUser, Content: "again"},
-		{Role: llm.RoleAssistant, Content: "ok", Usage: llm.Usage{TotalTokens: 25}, Model: "other"},
-	})
-
-	stats := m.computeTokenStats()
-	assert.Equal(t, 25, stats.lastTurn)
-	assert.Equal(t, 35, stats.sessionTotal)
-	assert.Equal(t, map[string]int{"test": 10, "other": 25}, stats.byModel)
-}
-
 func TestStatusViewContainsTokenCounters(t *testing.T) {
 	m := newTestModel(&mockClient{})
 	m.agent.SetMessages([]llm.Message{
@@ -489,6 +522,45 @@ func TestStatusViewContainsTokenCounters(t *testing.T) {
 	view := m.View()
 	assert.Contains(t, view, "TOKENS")
 	assert.Contains(t, view, "1.5k")
+}
+
+func TestStatusViewContainsContextCounters(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.contextWindow = contextwindow.Window{Tokens: 128000, Source: contextwindow.SourceConfig}
+	m.agent.SetMessages([]llm.Message{
+		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{PromptTokens: 12300, TotalTokens: 1500}, Model: "test"},
+	})
+	m.width = 120
+	m.height = 24
+	m.recalcLayout()
+
+	view := m.View()
+	assert.Contains(t, view, "CTX")
+	assert.Contains(t, view, "12.3k/115.7k")
+}
+
+func TestContextWindowResolverCommandUpdatesKnownWindow(t *testing.T) {
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+	m := newModel(
+		ag,
+		testConfig(),
+		session.New(),
+		nil,
+		nil,
+		contextwindow.Window{},
+		func(context.Context) contextwindow.Window {
+			return contextwindow.Window{Tokens: 128000, Source: contextwindow.SourceProps}
+		},
+	)
+
+	cmd := m.resolveContextWindowCmd()
+	require.NotNil(t, cmd)
+
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(*model)
+
+	assert.Equal(t, contextwindow.Window{Tokens: 128000, Source: contextwindow.SourceProps}, m.contextWindow)
 }
 
 func TestConfirmationOverlayKeyDecisions(t *testing.T) {
@@ -554,8 +626,9 @@ func TestSessionOverlayShowsTokenBreakdown(t *testing.T) {
 	m := newTestModel(&mockClient{})
 	m.agent.SetMessages([]llm.Message{
 		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{TotalTokens: 100}, Model: "m1", Metadata: map[string]any{"turn": 1}},
-		{Role: llm.RoleAssistant, Content: "ok", Usage: llm.Usage{TotalTokens: 200}, Model: "m2", Metadata: map[string]any{"turn": 2, "loop_name": "review", "loop_node_id": "prompt"}},
+		{Role: llm.RoleAssistant, Content: "ok", Usage: llm.Usage{PromptTokens: 12300, TotalTokens: 200}, Model: "m2", Metadata: map[string]any{"turn": 2, "loop_name": "review", "loop_node_id": "prompt"}},
 	})
+	m.contextWindow = contextwindow.Window{Tokens: 128000, Source: contextwindow.SourceConfig}
 	m.width = 80
 	m.height = 24
 	m.recalcLayout()
@@ -565,6 +638,8 @@ func TestSessionOverlayShowsTokenBreakdown(t *testing.T) {
 	items := strings.Join(m.overlayItems, "\n")
 	assert.Contains(t, items, "Tokens (last turn): 200")
 	assert.Contains(t, items, "Tokens (session):   300")
+	assert.Contains(t, items, "Context: 12.3k/115.7k")
+	assert.Contains(t, items, "Context source: config context_window")
 	assert.Contains(t, items, "m1: 100")
 	assert.Contains(t, items, "m2: 200")
 	assert.Contains(t, items, "turn 1: 100 tokens (m1)")
@@ -575,4 +650,41 @@ func TestSessionOverlayShowsTokenBreakdown(t *testing.T) {
 	view := m.overlayView()
 	assert.Contains(t, view, "Tokens (last turn): 200")
 	assert.Contains(t, view, "Per model:")
+}
+
+func TestHandleCompress_SetsCompressingAndBlursTextarea(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.textarea.Focus()
+
+	updated, cmd := m.handleCompress()
+	m = updated
+
+	assert.True(t, m.compressing)
+	assert.False(t, m.textarea.Focused())
+	require.NotNil(t, cmd)
+}
+
+func TestCompressMsg_ClearsCompressingAndFocusesTextarea(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.compressing = true
+	m.textarea.Blur()
+
+	teaModel, _ := m.Update(compressMsg{summary: "short summary"})
+	m = teaModel.(*model)
+
+	assert.False(t, m.compressing)
+	assert.True(t, m.textarea.Focused())
+	assert.Contains(t, m.messages[len(m.messages)-1].Text, "Context compressed")
+}
+
+func TestHandleKey_BlockedWhileCompressing(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.compressing = true
+	m.textarea.Focus()
+
+	updated, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated
+
+	assert.True(t, m.compressing)
+	assert.Nil(t, cmd)
 }

@@ -658,3 +658,47 @@ func TestAgent_RunWithOptionsScopedSystemMessagesAreNotPersisted(t *testing.T) {
 		assert.NotContains(t, msg.Content, "scoped only")
 	}
 }
+
+func TestAgent_Compress_SummarizesConversation(t *testing.T) {
+	mock := &mockClient{Fallback: scriptText("summary text")}
+	ag := New(Config{Model: llm.Model{ID: "test"}, Client: mock, APIKey: "key"}, "be helpful")
+	ag.SetMessages([]llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{Role: llm.RoleAssistant, Content: "hi"},
+	})
+
+	summary, err := ag.Compress(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, "summary text", summary)
+	assert.Equal(t, 1, mock.Calls)
+	assert.Equal(t, "key", mock.LastRequest.APIKey)
+	require.Len(t, mock.LastRequest.Messages, 2)
+	assert.Equal(t, llm.RoleSystem, mock.LastRequest.Messages[0].Role)
+	assert.Contains(t, mock.LastRequest.Messages[1].Content, "[system]")
+	assert.Contains(t, mock.LastRequest.Messages[1].Content, "[user]")
+	assert.Contains(t, mock.LastRequest.Messages[1].Content, "hello")
+}
+
+func TestAgent_Compress_PropagatesStreamError(t *testing.T) {
+	mock := &mockClient{StreamErr: errors.New("stream broke")}
+	ag := New(Config{Model: llm.Model{ID: "test"}, Client: mock}, "system")
+
+	_, err := ag.Compress(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stream compression")
+}
+
+func TestAgent_Compress_PropagatesEventError(t *testing.T) {
+	mock := &mockClient{Fallback: []llm.StreamEvent{
+		{Text: "partial"},
+		{Err: errors.New("mid-stream failure")},
+	}}
+	ag := New(Config{Model: llm.Model{ID: "test"}, Client: mock}, "system")
+
+	_, err := ag.Compress(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mid-stream failure")
+}

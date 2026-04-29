@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"nncode/internal/config"
+	"nncode/internal/contextwindow"
 	"nncode/internal/llm"
 	"nncode/internal/skills"
 
@@ -66,6 +67,12 @@ func find(checks []Check, name string) Check {
 	return Check{}
 }
 
+func staticContextResolver(window contextwindow.Window) func(context.Context, config.Model, string) contextwindow.Window {
+	return func(context.Context, config.Model, string) contextwindow.Window {
+		return window
+	}
+}
+
 func TestRun_OKWithoutLive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
@@ -74,11 +81,30 @@ func TestRun_OKWithoutLive(t *testing.T) {
 
 	assert.Equal(t, StatusOK, find(checks, "config").Status)
 	assert.Equal(t, StatusOK, find(checks, "model").Status)
+	assert.Equal(t, StatusWarn, find(checks, "context window").Status)
 	assert.Equal(t, StatusOK, find(checks, "tools").Status)
 	assert.Equal(t, StatusOK, find(checks, "skills").Status)
 	assert.Equal(t, StatusOK, find(checks, "loops").Status)
 	assert.Equal(t, StatusOK, find(checks, "sessions").Status)
 	assert.Equal(t, StatusWarn, find(checks, "live request").Status)
+	assert.False(t, HasFailures(checks))
+}
+
+func TestRun_ContextWindowConfiguredWithoutLive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	cfg := testConfig()
+	model := cfg.Models["local"]
+	model.ContextWindow = 128000
+	cfg.Models["local"] = model
+
+	checks := Run(context.Background(), Options{Config: cfg})
+
+	contextCheck := find(checks, "context window")
+	assert.Equal(t, StatusOK, contextCheck.Status)
+	assert.Contains(t, contextCheck.Detail, "128000 tokens")
+	assert.Contains(t, contextCheck.Detail, "config context_window")
 	assert.False(t, HasFailures(checks))
 }
 
@@ -171,9 +197,18 @@ func TestRun_LiveSuccess(t *testing.T) {
 		{Done: &llm.Done{StopReason: "stop"}},
 	}}
 
-	checks := Run(context.Background(), Options{Config: testConfig(), Live: true, Client: client})
+	checks := Run(context.Background(), Options{
+		Config: testConfig(),
+		Live:   true,
+		Client: client,
+		ContextResolver: staticContextResolver(contextwindow.Window{
+			Tokens: 128000,
+			Source: contextwindow.SourceProps,
+		}),
+	})
 
 	assert.Equal(t, StatusOK, find(checks, "live request").Status)
+	assert.Equal(t, StatusOK, find(checks, "context window").Status)
 	assert.False(t, HasFailures(checks))
 }
 
@@ -182,7 +217,15 @@ func TestRun_LiveFailure(t *testing.T) {
 
 	client := &mockClient{err: errors.New("connection refused")}
 
-	checks := Run(context.Background(), Options{Config: testConfig(), Live: true, Client: client})
+	checks := Run(context.Background(), Options{
+		Config: testConfig(),
+		Live:   true,
+		Client: client,
+		ContextResolver: staticContextResolver(contextwindow.Window{
+			Tokens: 0,
+			Source: contextwindow.SourceUnknown,
+		}),
+	})
 
 	assert.Equal(t, StatusFail, find(checks, "live request").Status)
 	assert.True(t, HasFailures(checks))

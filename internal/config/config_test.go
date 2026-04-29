@@ -17,8 +17,11 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Contains(t, cfg.Models, "gpt-4o")
 	assert.Contains(t, cfg.Models, "llama3")
 	assert.Equal(t, APITypeOpenAICompletions, cfg.Models["gpt-4o"].APIType)
+	assert.Equal(t, 128000, cfg.Models["gpt-4o"].ContextWindow)
+	assert.Equal(t, 200000, cfg.Models["o3"].ContextWindow)
 	assert.Equal(t, APITypeOpenAICompletions, cfg.Models["llama3"].APIType)
 	assert.Equal(t, "http://127.0.0.1:8033/v1", cfg.Models["llama3"].BaseURL)
+	assert.Equal(t, 128000, cfg.Models["llama3"].ContextWindow)
 	assert.Equal(t, 50000, cfg.Tools.MaxReadBytes)
 	assert.Equal(t, 1000000, cfg.Tools.MaxWriteBytes)
 	assert.Equal(t, 10000, cfg.Tools.MaxBashOutputBytes)
@@ -47,7 +50,7 @@ func TestLoad_WithConfigFile(t *testing.T) {
 	cfgData := `{
 		"default_model": "gpt-4o-mini",
 		"models": {
-			"gpt-4o-mini": { "api_type": "openai-completions", "provider": "openai" }
+			"gpt-4o-mini": { "api_type": "openai-completions", "provider": "openai", "context_window": 128000, "context_probe": "off" }
 		}
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(cfgData), 0644))
@@ -56,6 +59,8 @@ func TestLoad_WithConfigFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-4o-mini", cfg.DefaultModel)
 	assert.Equal(t, APITypeOpenAICompletions, cfg.Models["gpt-4o-mini"].APIType)
+	assert.Equal(t, 128000, cfg.Models["gpt-4o-mini"].ContextWindow)
+	assert.Equal(t, ContextProbeOff, cfg.Models["gpt-4o-mini"].ContextProbe)
 }
 
 func TestLoad_PartialConfigPreservesDefaults(t *testing.T) {
@@ -131,8 +136,30 @@ func TestAutoVendModel_AddsEntryFromTemplate(t *testing.T) {
 	assert.Equal(t, APITypeOpenAICompletions, m.APIType)
 	assert.Equal(t, "http://127.0.0.1:8033/v1", m.BaseURL)
 	assert.Equal(t, "local", m.Provider)
+	assert.Equal(t, 128000, m.ContextWindow)
 	assert.Empty(t, m.ID, "ID must be empty so RequestID falls back to the map key")
 	assert.NoError(t, cfg.Validate())
+}
+
+func TestAutoVendModel_CopiesContextWindow(t *testing.T) {
+	cfg := &Config{
+		DefaultModel: "local",
+		Models: map[string]Model{
+			"local": {
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "local",
+				BaseURL:       "http://127.0.0.1:8033/v1",
+				ContextWindow: 128000,
+				ContextProbe:  ContextProbeLlamaCPP,
+			},
+		},
+	}
+
+	vended := cfg.AutoVendModel("qwen")
+
+	require.True(t, vended)
+	assert.Equal(t, 128000, cfg.Models["qwen"].ContextWindow)
+	assert.Equal(t, ContextProbeLlamaCPP, cfg.Models["qwen"].ContextProbe)
 }
 
 func TestAutoVendModel_NoOpWhenModelExists(t *testing.T) {
@@ -193,6 +220,34 @@ func TestMerge_Overlay(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:8033/v1", base.Models["llama3"].BaseURL)
 	assert.Equal(t, "lmstudio", base.Models["shared"].Provider, "overlay should replace the shared entry")
 	assert.Equal(t, "openai", base.Models["gpt-4o"].Provider, "untouched entries survive")
+}
+
+func TestMerge_ModelContextWindowOverlay(t *testing.T) {
+	base := &Config{
+		DefaultModel: "local",
+		Models: map[string]Model{
+			"local": {
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "local",
+				BaseURL:       "http://127.0.0.1:8033/v1",
+				ContextWindow: 4096,
+			},
+		},
+	}
+	overlay := &Config{
+		Models: map[string]Model{
+			"local": {
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "local",
+				BaseURL:       "http://127.0.0.1:8033/v1",
+				ContextWindow: 128000,
+			},
+		},
+	}
+
+	base.Merge(overlay)
+
+	assert.Equal(t, 128000, base.Models["local"].ContextWindow)
 }
 
 func TestMerge_NilOverlay(t *testing.T) {
@@ -262,6 +317,29 @@ func TestModelValidate_RejectsInvalidBaseURL(t *testing.T) {
 	err := m.Validate("local")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "base_url")
+}
+
+func TestModelValidate_RejectsNegativeContextWindow(t *testing.T) {
+	m := Model{APIType: APITypeOpenAICompletions, Provider: "openai", ContextWindow: -1}
+	err := m.Validate("gpt-test")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context_window")
+}
+
+func TestModelValidate_RejectsUnsupportedContextProbe(t *testing.T) {
+	m := Model{APIType: APITypeOpenAICompletions, Provider: "openai", ContextProbe: "anthropic"}
+	err := m.Validate("gpt-test")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context_probe")
+}
+
+func TestModelValidate_AllowsContextProbeValues(t *testing.T) {
+	for _, probe := range []string{"", ContextProbeAuto, ContextProbeOff, ContextProbeLlamaCPP} {
+		t.Run(probe, func(t *testing.T) {
+			m := Model{APIType: APITypeOpenAICompletions, Provider: "openai", ContextProbe: probe}
+			assert.NoError(t, m.Validate("gpt-test"))
+		})
+	}
 }
 
 func TestModelValidate_AllowsEmptyAPIType(t *testing.T) {

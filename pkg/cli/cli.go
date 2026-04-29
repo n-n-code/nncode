@@ -17,7 +17,9 @@ import (
 	"nncode/internal/agent"
 	"nncode/internal/agentloop"
 	"nncode/internal/config"
-	"nncode/internal/llm"
+	"nncode/internal/contextprint"
+	"nncode/internal/contextstats"
+	"nncode/internal/contextwindow"
 	"nncode/internal/session"
 	"nncode/internal/skills"
 )
@@ -32,7 +34,12 @@ type CLI struct {
 	inputIsTerminal func() bool
 	skillRegistry   *skills.Registry
 	skillActivator  *skills.Activator
+	contextWindow   contextwindow.Window
+	contextResolver func(context.Context) contextwindow.Window
 	strictPiped     bool
+	confirm         bool
+	noConfirm       bool
+	confirmSkipped  bool
 	loopRef         string
 }
 
@@ -67,6 +74,25 @@ func WithSkills(registry *skills.Registry, activator *skills.Activator) Option {
 	return func(c *CLI) {
 		c.skillRegistry = registry
 		c.skillActivator = activator
+	}
+}
+
+func WithContextWindow(window contextwindow.Window) Option {
+	return func(c *CLI) {
+		c.contextWindow = window
+	}
+}
+
+func WithContextResolver(resolve func(context.Context) contextwindow.Window) Option {
+	return func(c *CLI) {
+		c.contextResolver = resolve
+	}
+}
+
+func WithConfirm(confirm, noConfirm bool) Option {
+	return func(c *CLI) {
+		c.confirm = confirm
+		c.noConfirm = noConfirm
 	}
 }
 
@@ -145,6 +171,15 @@ func (c *CLI) runPiped(ctx context.Context) error {
 		return nil
 	}
 
+	if c.confirm && !c.noConfirm {
+		c.agent.SetEffectfulToolConfirm(func(_ context.Context, req agent.ConfirmRequest) (agent.ConfirmDecision, error) {
+			c.confirmSkipped = true
+			fmt.Fprintf(c.errOut, "[confirm] %s %s — skipped (piped mode)\n", req.Name, req.Args)
+
+			return agent.ConfirmSkip, nil
+		})
+	}
+
 	var outcome promptOutcome
 	if c.loopRef != "" {
 		outcome = c.runLoop(ctx, c.loopRef, prompt)
@@ -152,7 +187,17 @@ func (c *CLI) runPiped(ctx context.Context) error {
 		outcome = c.runPrompt(ctx, prompt)
 	}
 
+	if outcome.Err == nil {
+		c.resolveContextWindow(ctx)
+		c.printContextSummary()
+	}
+
 	c.saveSession()
+
+	if c.confirmSkipped {
+		fmt.Fprintln(c.errOut,
+			"warning: effectful tools were skipped by -confirm. Re-run with -no-confirm to execute them.")
+	}
 
 	if outcome.Err != nil {
 		return outcome.Err
@@ -173,6 +218,27 @@ func (c *CLI) runPiped(ctx context.Context) error {
 }
 
 func (c *CLI) runInteractive(ctx context.Context) error {
+	if c.confirm {
+		c.agent.SetEffectfulToolConfirm(func(_ context.Context, req agent.ConfirmRequest) (agent.ConfirmDecision, error) {
+			fmt.Fprintf(c.out, "\n[confirm] %s %s — execute? [y/n/stop] ", req.Name, req.Args)
+			reader := bufio.NewReader(c.in)
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				//nolint:nilerr // EOF or read error means cancel.
+				return agent.ConfirmStop, nil
+			}
+
+			switch strings.ToLower(strings.TrimSpace(line)) {
+			case "y", "yes":
+				return agent.ConfirmAllow, nil
+			case "n", "no":
+				return agent.ConfirmSkip, nil
+			default:
+				return agent.ConfirmStop, nil
+			}
+		})
+	}
+
 	fmt.Fprintf(c.out, "nncode - model: %s\n", c.agent.Model().ID)
 	fmt.Fprintln(c.out, "Type your message and press Enter. /help for commands, /quit to exit.")
 	fmt.Fprintln(c.out)
@@ -230,32 +296,25 @@ func (c *CLI) handleCommand(ctx context.Context, line string) bool {
 	case "/quit", "/exit":
 		return true
 	case "/help":
-		fmt.Fprintln(c.out, "Commands:")
-		fmt.Fprintln(c.out, "  /help              Show this help")
-		fmt.Fprintln(c.out, "  /quit              Exit the agent")
-		fmt.Fprintln(c.out, "  /reset             Clear conversation history")
-		fmt.Fprintln(c.out, "  /session           Show current session info")
-		fmt.Fprintln(c.out, "  /sessions          List saved sessions")
-		fmt.Fprintln(c.out, "  /resume <id|path>  Load a saved session")
-		fmt.Fprintln(c.out, "  /tools             List available tools")
-		fmt.Fprintln(c.out, "  /skills            List discovered Agent Skills")
-		fmt.Fprintln(c.out, "  /skill:name [msg]  Activate an Agent Skill, optionally then run msg")
-		fmt.Fprintln(c.out, "  /loops             Browse configured Agent Loops")
-		fmt.Fprintln(c.out, "  /loop <name> [msg] Run an Agent Loop, optionally with msg")
-		fmt.Fprintln(c.out, "  /loop-validate <name|path>")
-		fmt.Fprintln(c.out, "  /prompt            Show the current system prompt")
+		c.printHelp()
 	case "/reset":
-		c.agent.Reset()
-
-		if c.skillActivator != nil {
-			c.skillActivator.Reset()
-		}
-
-		c.sess = session.New()
+		c.resetContext()
 		fmt.Fprintln(c.out, "Session reset.")
+	case "/context":
+		c.handleContextCommand(fields)
+	case "/compress":
+		c.handleCompressCommand(ctx)
 	case "/session":
+		c.resolveContextWindow(ctx)
+		stats := contextstats.Compute(c.agent.Messages())
 		fmt.Fprintf(c.out, "ID:       %s\n", c.sess.ID)
 		fmt.Fprintf(c.out, "Messages: %d\n", len(c.agent.Messages()))
+		fmt.Fprintf(
+			c.out,
+			"Context:  %s\n",
+			stats.ContextUsage(c.contextWindow),
+		)
+		fmt.Fprintf(c.out, "Ctx src:  %s\n", contextwindow.FormatSource(c.contextWindow))
 
 		if c.sess.FilePath != "" {
 			fmt.Fprintf(c.out, "File:     %s\n", c.sess.FilePath)
@@ -283,6 +342,84 @@ func (c *CLI) handleCommand(ctx context.Context, line string) bool {
 	}
 
 	return false
+}
+
+func (c *CLI) printHelp() {
+	fmt.Fprintln(c.out, "Commands:")
+	fmt.Fprintln(c.out, "  /help              Show this help")
+	fmt.Fprintln(c.out, "  /quit              Exit the agent")
+	fmt.Fprintln(c.out, "  /reset             Clear conversation history")
+	fmt.Fprintln(c.out, "  /context -print|-reset  Print or reset stored context")
+	fmt.Fprintln(c.out, "  /compress          Summarize conversation and compress context")
+	fmt.Fprintln(c.out, "  /session           Show current session info")
+	fmt.Fprintln(c.out, "  /sessions          List saved sessions")
+	fmt.Fprintln(c.out, "  /resume <id|path>  Load a saved session")
+	fmt.Fprintln(c.out, "  /tools             List available tools")
+	fmt.Fprintln(c.out, "  /skills            List discovered Agent Skills")
+	fmt.Fprintln(c.out, "  /skill:name [msg]  Activate an Agent Skill, optionally then run msg")
+	fmt.Fprintln(c.out, "  /loops             Browse configured Agent Loops")
+	fmt.Fprintln(c.out, "  /loop <name> [msg] Run an Agent Loop, optionally with msg")
+	fmt.Fprintln(c.out, "  /loop-validate <name|path>")
+	fmt.Fprintln(c.out, "  /prompt            Show the current system prompt")
+}
+
+func (c *CLI) handleContextCommand(fields []string) {
+	if len(fields) != 2 {
+		fmt.Fprintln(c.out, "Usage: /context -print|-reset")
+
+		return
+	}
+
+	switch fields[1] {
+	case "-print":
+		fmt.Fprintln(c.out, "Stored Context:")
+		fmt.Fprintln(c.out, contextprint.StoredContextNote)
+		fmt.Fprintln(c.out)
+		fmt.Fprintln(c.out, contextprint.Format(c.agent.SystemPrompt(), c.agent.Messages()))
+	case "-reset":
+		c.resetContext()
+		fmt.Fprintln(c.out, "Context reset.")
+	default:
+		fmt.Fprintln(c.out, "Usage: /context -print|-reset")
+	}
+}
+
+func (c *CLI) resetContext() {
+	c.agent.Reset()
+
+	if c.skillActivator != nil {
+		c.skillActivator.Reset()
+	}
+
+	c.sess = session.New()
+}
+
+func (c *CLI) handleCompressCommand(ctx context.Context) {
+	summary, err := c.agent.Compress(ctx)
+	if err != nil {
+		fmt.Fprintf(c.out, "Compression failed: %v\n", err)
+		return
+	}
+
+	c.agent.Reset()
+	c.agent.AddSystemMessage(summary)
+	c.sess = session.New()
+	c.sess.Messages = c.agent.Messages()
+
+	fmt.Fprintln(c.out, "Context compressed.")
+	fmt.Fprintln(c.out, "Summary:")
+	fmt.Fprintln(c.out, summary)
+}
+
+func (c *CLI) resolveContextWindow(ctx context.Context) {
+	if c.contextResolver == nil || c.contextWindow.Known() {
+		return
+	}
+
+	window := c.contextResolver(ctx)
+	if window.Known() {
+		c.contextWindow = window
+	}
 }
 
 func (c *CLI) listSkills() {
@@ -564,20 +701,29 @@ func (c *CLI) runEvents(events <-chan agent.Event) promptOutcome {
 
 // printTokenSummary prints a compact token usage line if any tokens were consumed.
 func (c *CLI) printTokenSummary() {
-	var sessionTotal, lastTurn int
-	for _, msg := range c.agent.Messages() {
-		if msg.Role == llm.RoleAssistant {
-			sessionTotal += msg.Usage.TotalTokens
-		}
+	stats := contextstats.Compute(c.agent.Messages())
+	if stats.SessionTokens > 0 {
+		fmt.Fprintf(c.out, "\033[2m[Tokens: %d this turn / %d session]\033[0m\n",
+			stats.LastTurnTokens,
+			stats.SessionTokens,
+		)
 	}
-	for i := len(c.agent.Messages()) - 1; i >= 0; i-- {
-		if c.agent.Messages()[i].Role == llm.RoleAssistant {
-			lastTurn = c.agent.Messages()[i].Usage.TotalTokens
-			break
-		}
+}
+
+func (c *CLI) printContextSummary() {
+	if !c.contextWindow.Known() {
+		return
 	}
-	if sessionTotal > 0 {
-		fmt.Fprintf(c.out, "\033[2m[Tokens: %d this turn / %d session]\033[0m\n", lastTurn, sessionTotal)
+
+	stats := contextstats.Compute(c.agent.Messages())
+	fmt.Fprintf(c.out, "\033[2m[CTX: %s]\033[0m\n", stats.ContextUsage(c.contextWindow))
+
+	const contextWarningThreshold = 0.8
+	if ratio := stats.ContextRatio(c.contextWindow); ratio >= contextWarningThreshold {
+		const percentMultiplier = 100
+		fmt.Fprintf(c.errOut,
+			"\033[33mwarning: context usage is %.0f%%. Use /compress to summarize and reset.\033[0m\n",
+			ratio*percentMultiplier)
 	}
 }
 

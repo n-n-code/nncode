@@ -30,6 +30,7 @@ type Message struct {
 	Usage      Usage          `json:"usage,omitzero"`
 	Model      string         `json:"model,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	IsError    bool           `json:"is_error,omitempty"`
 }
 
 type ToolCall struct {
