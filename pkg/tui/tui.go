@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"nncode/internal/agent"
 	"nncode/internal/config"
+	"nncode/internal/contextwindow"
 	"nncode/internal/session"
 	"nncode/internal/skills"
 )
@@ -18,8 +20,10 @@ func Run(
 	sess *session.Session,
 	reg *skills.Registry,
 	activator *skills.Activator,
+	window contextwindow.Window,
+	contextResolver func(context.Context) contextwindow.Window,
 ) error {
-	m := newModel(ag, cfg, sess, reg, activator)
+	m := newModel(ag, cfg, sess, reg, activator, window, contextResolver)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	finalModel, err := p.Run()

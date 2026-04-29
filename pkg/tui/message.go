@@ -63,22 +63,14 @@ func renderUserMsg(text string, width int) string {
 	padding := lipgloss.Width(UserMsg.Render(""))
 	available := max(width-prefixWidth-padding, 1)
 
-	wrapped := wrapLines(text, available)
-	lines := strings.Split(wrapped, "\n")
 	var builder strings.Builder
-
-	for index, line := range lines {
+	for index, line := range wrapPadLines(text, available) {
 		if index > 0 {
 			builder.WriteString("\n")
 			builder.WriteString(contPrefix)
 		} else {
 			builder.WriteString(prefix)
 		}
-
-		if lipgloss.Width(line) < available {
-			line += strings.Repeat(" ", available-lipgloss.Width(line))
-		}
-
 		builder.WriteString(UserMsg.Render(line))
 	}
 
@@ -92,19 +84,12 @@ func renderAssistantMsg(text string, width int) string {
 
 	padding := lipgloss.Width(AssistantMsg.Render(""))
 	available := max(width-padding, 1)
-	wrapped := wrapLines(text, available)
-	lines := strings.Split(wrapped, "\n")
-	var builder strings.Builder
 
-	for index, line := range lines {
+	var builder strings.Builder
+	for index, line := range wrapPadLines(text, available) {
 		if index > 0 {
 			builder.WriteString("\n")
 		}
-
-		if lipgloss.Width(line) < available {
-			line += strings.Repeat(" ", available-lipgloss.Width(line))
-		}
-
 		builder.WriteString(AssistantMsg.Render(line))
 	}
 
@@ -122,11 +107,7 @@ func renderToolCall(name, args string, width int) string {
 		preview += " " + truncateInline(args, max(width-lipgloss.Width(preview)-padding, 1))
 	}
 
-	if lipgloss.Width(preview) < width-padding {
-		preview += strings.Repeat(" ", width-padding-lipgloss.Width(preview))
-	}
-
-	return ToolCall.Render(preview)
+	return ToolCall.Render(padRight(preview, width-padding))
 }
 
 func renderToolResult(name, result string, isError, expanded bool, width int) string {
@@ -141,16 +122,16 @@ func renderToolResult(name, result string, isError, expanded bool, width int) st
 		prefix += "✓ "
 	}
 
-	clean := skills.StripActivationMarkers(result)
-	clean = strings.ReplaceAll(clean, "\n", " ")
-	clean = strings.TrimSpace(clean)
-
 	if expanded {
 		// Show full result in a code block style.
 		block := CodeBlock.Render(wrapLines(result, max(width-codeBlockPadding, 1)))
 
 		return prefix + block
 	}
+
+	clean := skills.StripActivationMarkers(result)
+	clean = strings.ReplaceAll(clean, "\n", " ")
+	clean = strings.TrimSpace(clean)
 
 	padding := lipgloss.Width(ToolResult.Render(""))
 	available := max(width-lipgloss.Width(prefix)-padding, 1)
@@ -159,15 +140,12 @@ func renderToolResult(name, result string, isError, expanded bool, width int) st
 		preview = "(no output)"
 	}
 
-	if lipgloss.Width(preview) < available {
-		preview += strings.Repeat(" ", available-lipgloss.Width(preview))
-	}
-
+	style := ToolResult
 	if isError {
-		return Error.Render(prefix + preview)
+		style = Error
 	}
 
-	return ToolResult.Render(prefix + preview)
+	return style.Render(prefix + padRight(preview, available))
 }
 
 func renderLoopStatus(text string, width int) string {
@@ -179,11 +157,30 @@ func renderLoopStatus(text string, width int) string {
 	padding := lipgloss.Width(ToolResult.Render(""))
 	available := max(width-lipgloss.Width(prefix)-padding, 1)
 	preview := truncateInline(text, available)
-	if lipgloss.Width(preview) < available {
-		preview += strings.Repeat(" ", available-lipgloss.Width(preview))
+
+	return ToolResult.Render(prefix + padRight(preview, available))
+}
+
+// wrapPadLines wraps text to width and right-pads each resulting line with
+// spaces so every line has the same display width. Used by message renderers
+// to fill a styled background to the edge.
+func wrapPadLines(text string, width int) []string {
+	lines := strings.Split(wrapLines(text, width), "\n")
+	for i, line := range lines {
+		lines[i] = padRight(line, width)
 	}
 
-	return ToolResult.Render(prefix + preview)
+	return lines
+}
+
+// padRight extends s with spaces so its display width equals width. Returns s
+// unchanged when it is already at least width cells wide.
+func padRight(s string, width int) string {
+	if w := lipgloss.Width(s); w < width {
+		return s + strings.Repeat(" ", width-w)
+	}
+
+	return s
 }
 
 // wrapLines wraps text to width using rune-width and ANSI-escape aware logic.

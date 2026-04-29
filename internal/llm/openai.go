@@ -8,12 +8,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 var errHTTPError = errors.New("HTTP error")
+
+const (
+	maxRetries  = 3
+	retryBase   = 1 * time.Second
+	retryFactor = 2
+)
 
 // OpenAIClient speaks the OpenAI Chat Completions API. It works against
 // api.openai.com as well as any OpenAI-compatible server (Ollama, LM Studio,
@@ -124,17 +132,10 @@ func (c *OpenAIClient) Stream(ctx context.Context, req Request) (<-chan StreamEv
 		client = http.DefaultClient
 	}
 
-	resp, err := client.Do(httpReq)
+	//nolint:bodyclose // Body is closed by the goroutine below.
+	resp, err := doWithRetry(ctx, client, httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		defer func() { _ = resp.Body.Close() }()
-
-		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-
-		return nil, fmt.Errorf("HTTP %d: %s: %w", resp.StatusCode, strings.TrimSpace(string(errBody)), errHTTPError)
+		return nil, err
 	}
 
 	events := make(chan StreamEvent, 32)
@@ -147,6 +148,76 @@ func (c *OpenAIClient) Stream(ctx context.Context, req Request) (<-chan StreamEv
 	}()
 
 	return events, nil
+}
+
+func doWithRetry(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
+	var lastErr error
+
+	delay := retryBase
+	for attempt := range maxRetries + 1 {
+		if attempt > 0 {
+			if req.GetBody != nil {
+				var bodyErr error
+				req.Body, bodyErr = req.GetBody()
+				if bodyErr != nil {
+					return nil, fmt.Errorf("reset request body: %w", bodyErr)
+				}
+			}
+
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+
+				return nil, fmt.Errorf("retry cancelled: %w", ctx.Err())
+			case <-timer.C:
+			}
+			delay *= retryFactor
+		}
+
+		//nolint:gosec // Request URL comes from trusted model configuration.
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %w", err)
+			if !isRetryableError(err, 0) {
+				return nil, lastErr
+			}
+
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		_ = resp.Body.Close()
+
+		lastErr = fmt.Errorf("HTTP %d: %s: %w", resp.StatusCode, strings.TrimSpace(string(errBody)), errHTTPError)
+		if !isRetryableError(nil, resp.StatusCode) {
+			return nil, lastErr
+		}
+	}
+
+	return nil, lastErr
+}
+
+func isRetryableError(err error, statusCode int) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+
+	return false
 }
 
 func buildRequestBody(req Request) ([]byte, error) {

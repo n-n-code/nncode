@@ -9,8 +9,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
+	"nncode/internal/contextprint"
 	"nncode/internal/llm"
 )
 
@@ -111,6 +113,47 @@ func (a *Agent) SetMessages(m []llm.Message) {
 // Reset clears conversation history. Config (model, tools, system prompt)
 // is preserved.
 func (a *Agent) Reset() { a.messages = nil }
+
+const compressSystemPrompt = "You are a conversation compressor. Summarize the provided conversation into a " +
+	"concise, self-contained paragraph that preserves all requirements, decisions, " +
+	"and context needed to continue the work. " +
+	"Include file paths, design choices, and any errors encountered. The summary will replace the conversation history."
+
+// Compress sends the current conversation to the model and returns a summary
+// that can be used as a replacement system context.
+//
+// Note: if the conversation already exceeds the model's context window, the
+// compression request itself may fail. This is a known edge case; callers should
+// handle the error gracefully.
+func (a *Agent) Compress(ctx context.Context) (string, error) {
+	text := contextprint.Format(a.systemPrompt, a.messages)
+	req := llm.Request{
+		Model:     a.cfg.Model,
+		APIKey:    a.cfg.APIKey,
+		MaxTokens: a.cfg.MaxTokens,
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: compressSystemPrompt},
+			{Role: llm.RoleUser, Content: text},
+		},
+	}
+
+	events, err := a.cfg.Client.Stream(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("stream compression: %w", err)
+	}
+
+	var summary strings.Builder
+	for ev := range events {
+		if ev.Err != nil {
+			return "", ev.Err
+		}
+		if ev.Text != "" {
+			summary.WriteString(ev.Text)
+		}
+	}
+
+	return strings.TrimSpace(summary.String()), nil
+}
 
 func (a *Agent) Run(ctx context.Context, userMsg string) <-chan Event {
 	return a.RunWithOptions(ctx, userMsg, RunOptions{})

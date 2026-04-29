@@ -15,10 +15,21 @@ import (
 const APITypeOpenAICompletions = "openai-completions"
 
 const (
+	ContextProbeAuto     = "auto"
+	ContextProbeOff      = "off"
+	ContextProbeLlamaCPP = "llamacpp"
+)
+
+const (
 	defaultMaxReadBytes       = 50000
 	defaultMaxWriteBytes      = 1000000
 	defaultMaxBashOutputBytes = 10000
 	defaultBashTimeoutSeconds = 120
+
+	defaultContextWindowGPT4o     = 128000
+	defaultContextWindowGPT4oMini = 128000
+	defaultContextWindowO3        = 200000
+	defaultContextWindowLlama3    = 128000
 )
 
 var (
@@ -29,6 +40,8 @@ var (
 	errUnsupportedAPIType         = errors.New("unsupported api_type")
 	errProviderRequired           = errors.New("provider is required")
 	errMaxTokensNegative          = errors.New("max_tokens cannot be negative")
+	errContextWindowNegative      = errors.New("context_window cannot be negative")
+	errContextProbeUnsupported    = errors.New("unsupported context_probe")
 	errBaseURLRequired            = errors.New("base_url is required")
 	errBaseURLScheme              = errors.New("base_url must use http or https")
 	errBaseURLHost                = errors.New("base_url must include a host")
@@ -53,11 +66,13 @@ type Config struct {
 
 // Model holds configuration for a single model.
 type Model struct {
-	ID        string `json:"id,omitempty"`
-	APIType   string `json:"api_type"` // "openai-completions" or empty for the default
-	Provider  string `json:"provider"`
-	BaseURL   string `json:"base_url,omitempty"`
-	MaxTokens int    `json:"max_tokens,omitempty"`
+	ID            string `json:"id,omitempty"`
+	APIType       string `json:"api_type"` // "openai-completions" or empty for the default
+	Provider      string `json:"provider"`
+	BaseURL       string `json:"base_url,omitempty"`
+	MaxTokens     int    `json:"max_tokens,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
+	ContextProbe  string `json:"context_probe,omitempty"`
 }
 
 // ToolConfig controls built-in tool availability and basic resource limits.
@@ -154,21 +169,25 @@ func defaultConfig() *Config {
 		DefaultModel: "gpt-4o",
 		Models: map[string]Model{
 			"gpt-4o": {
-				APIType:  APITypeOpenAICompletions,
-				Provider: "openai",
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "openai",
+				ContextWindow: defaultContextWindowGPT4o,
 			},
 			"gpt-4o-mini": {
-				APIType:  APITypeOpenAICompletions,
-				Provider: "openai",
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "openai",
+				ContextWindow: defaultContextWindowGPT4o,
 			},
 			"o3": {
-				APIType:  APITypeOpenAICompletions,
-				Provider: "openai",
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "openai",
+				ContextWindow: defaultContextWindowO3,
 			},
 			"llama3": {
-				APIType:  APITypeOpenAICompletions,
-				Provider: "local",
-				BaseURL:  "http://127.0.0.1:8033/v1",
+				APIType:       APITypeOpenAICompletions,
+				Provider:      "local",
+				BaseURL:       "http://127.0.0.1:8033/v1",
+				ContextWindow: defaultContextWindowGPT4o,
 			},
 		},
 		Tools: ToolConfig{
@@ -225,10 +244,12 @@ func (c *Config) AutoVendModel(name string) bool {
 
 	template := c.Models[templateName]
 	c.Models[name] = Model{
-		APIType:   template.APIType,
-		Provider:  template.Provider,
-		BaseURL:   template.BaseURL,
-		MaxTokens: template.MaxTokens,
+		APIType:       template.APIType,
+		Provider:      template.Provider,
+		BaseURL:       template.BaseURL,
+		MaxTokens:     template.MaxTokens,
+		ContextWindow: template.ContextWindow,
+		ContextProbe:  template.ContextProbe,
 	}
 
 	return true
@@ -294,6 +315,24 @@ func (m Model) Validate(name string) error {
 
 	if m.MaxTokens < 0 {
 		return fmt.Errorf("model %q max_tokens cannot be negative: %w", name, errMaxTokensNegative)
+	}
+
+	if m.ContextWindow < 0 {
+		return fmt.Errorf("model %q context_window cannot be negative: %w", name, errContextWindowNegative)
+	}
+
+	switch m.ContextProbe {
+	case "", ContextProbeAuto, ContextProbeOff, ContextProbeLlamaCPP:
+	default:
+		return fmt.Errorf(
+			"model %q uses unsupported context_probe %q (supported: %q, %q, %q): %w",
+			name,
+			m.ContextProbe,
+			ContextProbeAuto,
+			ContextProbeOff,
+			ContextProbeLlamaCPP,
+			errContextProbeUnsupported,
+		)
 	}
 
 	if m.BaseURL == "" {

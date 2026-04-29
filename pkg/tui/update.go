@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,7 +35,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentEventMsg:
 		m.handleAgentEvent(msg.Event)
-		// Schedule reading the next event.
 		cmds = append(cmds, nextEventCmd(m.eventCh))
 
 	case agentDoneMsg:
@@ -45,6 +45,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case confirmReqMsg:
 		m.pendingConfirm = &msg.req
 		m.overlay = overlayConfirm
+
+	case contextWindowMsg:
+		if msg.window.Known() {
+			m.contextWindow = msg.window
+			if m.overlay == overlaySessionInfo {
+				m.openSessionOverlay()
+			}
+		}
+
+	case compressMsg:
+		m.compressing = false
+		m.textarea.Focus()
+		if msg.err != nil {
+			m.appendMessage(msgItem{Kind: kindError, Text: "Compression failed: " + msg.err.Error()})
+		} else {
+			m.agent.Reset()
+			m.agent.AddSystemMessage(msg.summary)
+			m.sess = session.New()
+			m.sess.Messages = m.agent.Messages()
+			m.messages = nil
+			m.turnTextLen = 0
+			m.inTurn = false
+			m.syncViewportContent()
+			m.appendMessage(msgItem{Kind: kindAssistant, Text: "Context compressed. Summary:\n" + msg.summary})
+		}
 
 	default:
 		// Let bubbles handle their own messages (cursor blink, spinner tick, etc.).
@@ -63,20 +88,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleKey routes key presses based on whether an overlay is active.
-//
-//nolint:ireturn // Required by tea.Model interface.
-func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Global quit (or cancel current turn when running).
+func (m *model) handleKey(msg tea.KeyMsg) (*model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return m.handleCtrlC()
 	}
 
-	// Overlay navigation takes precedence.
+	if m.compressing {
+		return m, nil
+	}
+
 	if m.overlay != overlayNone {
 		return m.handleOverlayKey(msg)
 	}
 
-	// Textarea focus handling.
 	if m.textarea.Focused() {
 		//nolint:exhaustive // We only handle specific keys; all others pass to textarea.
 		switch msg.Type {
@@ -94,7 +118,6 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 
-			// Enter sends the message.
 			return m.sendInput()
 
 		default:
@@ -123,7 +146,6 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textarea.Blink
 	}
 
-	// Viewport navigation keys.
 	//nolint:exhaustive // We only handle navigation keys.
 	switch msg.Type {
 	case tea.KeyUp:
@@ -139,16 +161,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnd:
 		m.viewport.GotoBottom()
 	default:
-		// Ignore unhandled keys.
 	}
 
 	return m, nil
 }
 
-// handleCtrlC cancels the current turn if running, otherwise quits the app.
-//
-//nolint:ireturn // Required by tea.Model interface.
-func (m *model) handleCtrlC() (tea.Model, tea.Cmd) {
+func (m *model) handleCtrlC() (*model, tea.Cmd) {
 	if m.running && m.runCancel != nil {
 		m.runCancel()
 
@@ -161,9 +179,7 @@ func (m *model) handleCtrlC() (tea.Model, tea.Cmd) {
 }
 
 // sendInput reads the textarea, handles slash commands or sends to agent.
-//
-//nolint:ireturn // Required by tea.Model interface.
-func (m *model) sendInput() (tea.Model, tea.Cmd) {
+func (m *model) sendInput() (*model, tea.Cmd) {
 	input := strings.TrimSpace(m.textarea.Value())
 	if input == "" {
 		return m, nil
@@ -176,7 +192,6 @@ func (m *model) sendInput() (tea.Model, tea.Cmd) {
 		return m.handleSlashCommand(input)
 	}
 
-	// Normal user message.
 	m.appendMessage(msgItem{Kind: kindUser, Text: input})
 	m.running = true
 	m.textarea.Blur()
@@ -192,9 +207,7 @@ func (m *model) sendInput() (tea.Model, tea.Cmd) {
 }
 
 // handleSlashCommand processes CLI-style slash commands.
-//
-//nolint:ireturn // Required by tea.Model interface.
-func (m *model) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
+func (m *model) handleSlashCommand(line string) (*model, tea.Cmd) {
 	if strings.HasPrefix(line, "/skill:") {
 		return m.handleSkillCommand(line)
 	}
@@ -211,25 +224,17 @@ func (m *model) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	case "/help":
 		m.openHelpOverlay()
 	case "/reset":
-		m.agent.Reset()
-		if m.skillActivator != nil {
-			m.skillActivator.Reset()
-		}
-		m.sess = session.New()
-		m.messages = nil
-		m.turnTextLen = 0
-		m.inTurn = false
-		m.syncViewportContent()
+		m.handleReset()
+	case "/context":
+		m.handleContextCommand(fields)
+	case "/compress":
+		return m.handleCompress()
 	case "/session":
 		m.openSessionOverlay()
 	case "/sessions":
 		m.loadSessionsOverlay()
 	case "/resume":
-		if len(fields) != 2 {
-			m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /resume <session-id|path>"})
-		} else {
-			m.resumeSession(fields[1])
-		}
+		m.handleResume(fields)
 	case "/tools":
 		m.loadToolsOverlay()
 	case "/skills":
@@ -250,8 +255,61 @@ func (m *model) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-//nolint:ireturn // Required by tea.Model interface.
-func (m *model) handleLoopCommand(line string) (tea.Model, tea.Cmd) {
+func (m *model) handleReset() {
+	m.agent.Reset()
+	if m.skillActivator != nil {
+		m.skillActivator.Reset()
+	}
+	m.sess = session.New()
+	m.messages = nil
+	m.turnTextLen = 0
+	m.inTurn = false
+	m.syncViewportContent()
+}
+
+func (m *model) handleCompress() (*model, tea.Cmd) {
+	m.compressing = true
+	m.textarea.Blur()
+	m.appendMessage(msgItem{Kind: kindAssistant, Text: "Compressing context..."})
+	return m, m.compressCmd()
+}
+
+func (m *model) compressCmd() tea.Cmd {
+	return func() tea.Msg {
+		const compressTimeout = 60 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), compressTimeout)
+		defer cancel()
+
+		summary, err := m.agent.Compress(ctx)
+		return compressMsg{summary: summary, err: err}
+	}
+}
+
+func (m *model) handleContextCommand(fields []string) {
+	if len(fields) != 2 {
+		m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /context -print|-reset"})
+		return
+	}
+
+	switch fields[1] {
+	case "-print":
+		m.openContextOverlay()
+	case "-reset":
+		m.handleReset()
+	default:
+		m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /context -print|-reset"})
+	}
+}
+
+func (m *model) handleResume(fields []string) {
+	if len(fields) != 2 {
+		m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /resume <session-id|path>"})
+		return
+	}
+	m.resumeSession(fields[1])
+}
+
+func (m *model) handleLoopCommand(line string) (*model, tea.Cmd) {
 	rest := strings.TrimSpace(strings.TrimPrefix(line, "/loop"))
 	if rest == "" {
 		m.appendMessage(msgItem{Kind: kindError, Text: "Usage: /loop <name|path> [message]"})
@@ -322,9 +380,7 @@ func (m *model) validateLoopCommand(fields []string) {
 }
 
 // handleSkillCommand handles /skill:name [msg].
-//
-//nolint:ireturn // Required by tea.Model interface.
-func (m *model) handleSkillCommand(line string) (tea.Model, tea.Cmd) {
+func (m *model) handleSkillCommand(line string) (*model, tea.Cmd) {
 	if m.skillActivator == nil {
 		m.appendMessage(msgItem{Kind: kindError, Text: "No Agent Skills are configured."})
 		return m, nil
@@ -365,7 +421,6 @@ func (m *model) handleSkillCommand(line string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAgentEvent processes a single agent event.
 func (m *model) handleAgentEvent(ev agent.Event) {
 	switch ev.Type {
 	case agent.EventText:
@@ -374,9 +429,8 @@ func (m *model) handleAgentEvent(ev agent.Event) {
 	case agent.EventToolCallStart:
 		m.appendMessage(msgItem{Kind: kindToolCall, ToolName: ev.ToolName})
 	case agent.EventToolCallEnd:
-		// Update the last tool call with args.
-		if len(m.messages) > 0 {
-			last := &m.messages[len(m.messages)-1]
+		if n := len(m.messages); n > 0 {
+			last := &m.messages[n-1]
 			if last.Kind == kindToolCall && last.ToolName == ev.ToolName {
 				last.ToolArgs = ev.ToolArgs
 				m.syncViewportContent()
@@ -394,36 +448,26 @@ func (m *model) handleAgentEvent(ev agent.Event) {
 			m.err = ev.Err
 		}
 
+		text := ev.Err.Error()
 		if errors.Is(ev.Err, context.Canceled) {
-			m.appendMessage(msgItem{Kind: kindError, Text: "Turn canceled by user."})
-		} else {
-			m.appendMessage(msgItem{Kind: kindError, Text: ev.Err.Error()})
+			text = "Turn canceled by user."
 		}
+		m.appendMessage(msgItem{Kind: kindError, Text: text})
 	case agent.EventTurnStart:
 		m.turnTextLen = 0
 		m.inTurn = true
-	case agent.EventTurnEnd:
-		m.inTurn = false
-	case agent.EventDone:
+	case agent.EventTurnEnd, agent.EventDone:
 		m.inTurn = false
 	case agent.EventLoopStart,
 		agent.EventLoopIterationStart,
 		agent.EventLoopNodeStart,
 		agent.EventLoopNodeEnd,
 		agent.EventLoopExitDecision:
-		m.appendLoopStatus(ev)
+		if text := ev.LoopText(); text != "" {
+			m.appendMessage(msgItem{Kind: kindLoopStatus, Text: text})
+		}
 	default:
-		// no-op
 	}
-}
-
-func (m *model) appendLoopStatus(ev agent.Event) {
-	text := ev.LoopText()
-	if text == "" {
-		return
-	}
-
-	m.appendMessage(msgItem{Kind: kindLoopStatus, Text: text})
 }
 
 // resumeSession loads a session by id or path.
@@ -450,22 +494,10 @@ func (m *model) resumeSession(ref string) {
 		}
 	}
 
-	// Rebuild messages view from loaded history.
 	m.messages = nil
 	for _, msg := range loaded.Messages {
-		switch msg.Role {
-		case llm.RoleUser:
-			m.messages = append(m.messages, msgItem{Kind: kindUser, Text: msg.Content})
-		case llm.RoleAssistant:
-			m.messages = append(m.messages, msgItem{Kind: kindAssistant, Text: msg.Content})
-		case llm.RoleTool:
-			m.messages = append(m.messages, msgItem{
-				Kind:     kindToolResult,
-				ToolName: msg.ToolName,
-				Result:   msg.Content,
-			})
-		case llm.RoleSystem:
-			// Skip system messages in display.
+		if item, ok := msgItemFromHistory(msg); ok {
+			m.messages = append(m.messages, item)
 		}
 	}
 
@@ -473,4 +505,21 @@ func (m *model) resumeSession(ref string) {
 	m.appendMessage(msgItem{Kind: kindAssistant, Text: fmt.Sprintf(
 		"Resumed session %s (%d messages).", loaded.ID, len(loaded.Messages),
 	)})
+}
+
+// msgItemFromHistory maps a stored message to its display form. System
+// messages are skipped (returned ok=false).
+func msgItemFromHistory(msg llm.Message) (msgItem, bool) {
+	switch msg.Role {
+	case llm.RoleUser:
+		return msgItem{Kind: kindUser, Text: msg.Content}, true
+	case llm.RoleAssistant:
+		return msgItem{Kind: kindAssistant, Text: msg.Content}, true
+	case llm.RoleTool:
+		return msgItem{Kind: kindToolResult, ToolName: msg.ToolName, Result: msg.Content}, true
+	case llm.RoleSystem:
+		return msgItem{}, false
+	default:
+		return msgItem{}, false
+	}
 }

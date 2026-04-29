@@ -120,35 +120,30 @@ func updateBgState(params string, current bool) bool {
 	}
 
 	parts := strings.Split(params, ";")
-	for i := 0; i < len(parts); i++ {
-		switch parts[i] {
+	for i := 0; i < len(parts); {
+		switch param := parts[i]; param {
 		case "0", "49":
 			current = false
+			i++
 		case "48":
-			if i+1 >= len(parts) {
-				continue
-			}
-
-			switch parts[i+1] {
-			case "5":
-				if i+2 < len(parts) {
-					current = true
-					i += 2
-				}
-			case "2":
-				if i+4 < len(parts) {
-					current = true
-					i += 4
-				}
+			// Extended-bg introducer consumes its sub-params atomically;
+			// a malformed tail (missing operands) is skipped without state change.
+			switch {
+			case i+2 < len(parts) && parts[i+1] == "5":
+				current = true
+				i += 3
+			case i+4 < len(parts) && parts[i+1] == "2":
+				current = true
+				i += 5
+			default:
+				i++
 			}
 		default:
-			n, err := strconv.Atoi(parts[i])
-			if err != nil {
-				continue
-			}
-			if (n >= 40 && n <= 47) || (n >= 100 && n <= 107) {
+			if n, err := strconv.Atoi(param); err == nil &&
+				((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) {
 				current = true
 			}
+			i++
 		}
 	}
 

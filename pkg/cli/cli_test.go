@@ -12,6 +12,7 @@ import (
 
 	"nncode/internal/agent"
 	"nncode/internal/config"
+	"nncode/internal/contextwindow"
 	"nncode/internal/llm"
 	"nncode/internal/session"
 	"nncode/internal/skills"
@@ -251,10 +252,95 @@ func TestRun_InteractiveCommands(t *testing.T) {
 	text := out.String()
 	assert.Contains(t, text, "/sessions")
 	assert.Contains(t, text, "/resume <id|path>")
+	assert.Contains(t, text, "/context -print|-reset")
 	assert.Contains(t, text, "/skills")
 	assert.Contains(t, text, "read")
 	assert.Contains(t, text, "system prompt")
 	assert.Contains(t, text, "ID:")
+	assert.Contains(t, text, "Ctx src:")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRun_InteractiveContextPrintEmitsContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system prompt")
+	ag.SetMessages([]llm.Message{
+		{Role: llm.RoleUser, Content: "hello"},
+		{
+			Role:    llm.RoleAssistant,
+			Content: "using a tool",
+			ToolCalls: []llm.ToolCall{
+				{ID: "call-1", Name: "read", Args: []byte(`{"path":"README.md"}`)},
+			},
+		},
+		{Role: llm.RoleTool, Content: "contents", ToolCallID: "call-1", ToolName: "read"},
+	})
+
+	var out, errOut bytes.Buffer
+
+	input := strings.NewReader("/context -print\n/quit\n")
+	c := New(ag, testConfig(), session.New(), WithIO(input, &out, &errOut, true))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	text := out.String()
+	assert.Contains(t, text, "[system]")
+	assert.Contains(t, text, "Stored Context:")
+	assert.Contains(t, text, "Loop-scoped system messages")
+	assert.Contains(t, text, "system prompt")
+	assert.Contains(t, text, "[user]")
+	assert.Contains(t, text, "hello")
+	assert.Contains(t, text, "tool_calls:")
+	assert.Contains(t, text, "id=call-1 name=read")
+	assert.Contains(t, text, "[tool id=call-1 name=read]")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRunInteractiveSessionShowsContextSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+	ag.SetMessages([]llm.Message{
+		{Role: llm.RoleAssistant, Content: "hi", Usage: llm.Usage{PromptTokens: 12300, TotalTokens: 1500}, Model: "test"},
+	})
+
+	var out, errOut bytes.Buffer
+
+	input := strings.NewReader("/session\n/quit\n")
+	c := New(ag, testConfig(), session.New(),
+		WithIO(input, &out, &errOut, true),
+		WithContextWindow(contextwindow.Window{Tokens: 128000, Source: contextwindow.SourceConfig}))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	text := out.String()
+	assert.Contains(t, text, "Context:  12.3k/115.7k")
+	assert.Contains(t, text, "Ctx src:  config context_window")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRun_InteractiveContextResetClearsHistory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: &mockClient{}}, "system")
+	ag.SetMessages([]llm.Message{{Role: llm.RoleUser, Content: "prior"}})
+	sess := session.New()
+	sess.Messages = ag.Messages()
+
+	var out, errOut bytes.Buffer
+
+	input := strings.NewReader("/context -reset\n/session\n/quit\n")
+	c := New(ag, testConfig(), sess, WithIO(input, &out, &errOut, true))
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	assert.Empty(t, ag.Messages())
+	assert.Contains(t, out.String(), "Context reset.")
+	assert.Contains(t, out.String(), "Messages: 0")
 	assert.Empty(t, errOut.String())
 }
 
@@ -566,6 +652,33 @@ func TestRun_PipedPromptPrintsTokenSummary(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "[Tokens: 42 this turn / 42 session]")
+	assert.Empty(t, errOut.String())
+}
+
+func TestRun_PipedPromptResolvesContextSummaryAfterTurn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	client := &mockClient{events: textEventsWithUsage("hello", llm.Usage{PromptTokens: 12300, TotalTokens: 42})}
+	ag := agent.New(agent.Config{Model: llm.Model{ID: "test"}, Client: client}, "system")
+
+	var resolverCalled bool
+	var out, errOut bytes.Buffer
+	c := New(
+		ag,
+		testConfig(),
+		session.New(),
+		WithIO(strings.NewReader("say hi"), &out, &errOut, false),
+		WithContextResolver(func(context.Context) contextwindow.Window {
+			resolverCalled = true
+			return contextwindow.Window{Tokens: 128000, Source: contextwindow.SourceProps}
+		}),
+	)
+
+	err := c.RunContext(context.Background())
+
+	require.NoError(t, err)
+	assert.True(t, resolverCalled)
+	assert.Contains(t, out.String(), "[CTX: 12.3k/115.7k]")
 	assert.Empty(t, errOut.String())
 }
 

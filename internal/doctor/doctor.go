@@ -12,6 +12,7 @@ import (
 
 	"nncode/internal/agentloop"
 	"nncode/internal/config"
+	"nncode/internal/contextwindow"
 	"nncode/internal/llm"
 	"nncode/internal/session"
 	"nncode/internal/skills"
@@ -34,13 +35,14 @@ type Check struct {
 
 // Options controls diagnostic execution.
 type Options struct {
-	Config    *config.Config
-	ModelName string
-	APIKey    string
-	Live      bool
-	Client    llm.Client
-	Timeout   time.Duration
-	Skills    *skills.Registry
+	Config          *config.Config
+	ModelName       string
+	APIKey          string
+	Live            bool
+	Client          llm.Client
+	Timeout         time.Duration
+	Skills          *skills.Registry
+	ContextResolver func(context.Context, config.Model, string) contextwindow.Window
 }
 
 // Run executes diagnostics. It is intentionally side-effect-light except for
@@ -90,6 +92,7 @@ func Run(ctx context.Context, opts Options) []Check {
 	}
 
 	checks = append(checks, checkAPIKey(modelName, modelCfg, modelOK, opts.APIKey))
+	checks = append(checks, checkContextWindow(ctx, opts, modelName, modelCfg, modelOK))
 	checks = append(checks, checkTools(cfg.Tools)...)
 	checks = append(checks, checkSkills(opts.Skills))
 	checks = append(checks, checkLoops())
@@ -146,6 +149,52 @@ func checkAPIKey(modelName string, modelCfg config.Model, modelOK bool, apiKey s
 	}
 
 	return ok("api key", "not required for "+modelName)
+}
+
+func checkContextWindow(
+	ctx context.Context,
+	opts Options,
+	modelName string,
+	modelCfg config.Model,
+	modelOK bool,
+) Check {
+	if !modelOK {
+		return warn("context window", "skipped because model could not be resolved")
+	}
+
+	configured := contextwindow.Configured(modelCfg)
+	if !opts.Live {
+		if configured.Known() {
+			return ok("context window", contextWindowDetail(configured))
+		}
+
+		return warn("context window", "unknown; configure context_window or pass -live to query llama.cpp metadata")
+	}
+
+	resolver := opts.ContextResolver
+	if resolver == nil {
+		resolver = func(ctx context.Context, model config.Model, requestID string) contextwindow.Window {
+			return contextwindow.Resolver{HTTPClient: nil, APIKey: opts.APIKey}.Resolve(ctx, model, requestID)
+		}
+	}
+
+	liveCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
+
+	window := resolver(liveCtx, modelCfg, modelCfg.RequestID(modelName))
+	if window.Known() {
+		return ok("context window", contextWindowDetail(window))
+	}
+
+	if configured.Known() {
+		return ok("context window", contextWindowDetail(configured))
+	}
+
+	return warn("context window", "unknown; configure context_window or check the provider metadata endpoint")
+}
+
+func contextWindowDetail(window contextwindow.Window) string {
+	return fmt.Sprintf("%d tokens from %s", window.Tokens, contextwindow.FormatSource(window))
 }
 
 func checkTools(cfg config.ToolConfig) []Check {

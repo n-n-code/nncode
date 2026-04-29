@@ -153,6 +153,7 @@ func (a *Agent) emitToolResults(
 			Content:    results[i].Content,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
+			IsError:    results[i].IsError,
 		})
 
 		if !emit(ctx, out, Event{

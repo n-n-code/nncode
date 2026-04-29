@@ -15,7 +15,8 @@ import (
 	"nncode/internal/agent"
 	"nncode/internal/agentloop"
 	"nncode/internal/config"
-	"nncode/internal/llm"
+	"nncode/internal/contextstats"
+	"nncode/internal/contextwindow"
 	"nncode/internal/session"
 	"nncode/internal/skills"
 )
@@ -42,9 +43,6 @@ const (
 	// tokenEstimateDivisor is the rough chars-per-token heuristic used for
 	// live completion-token estimates while the stream is in progress.
 	tokenEstimateDivisor = 4
-	// token formatting thresholds.
-	tokenThousand = 1_000
-	tokenMillion  = 1_000_000
 )
 
 // toolConfirmReq carries an effectful tool confirmation request from the agent.
@@ -61,6 +59,17 @@ type confirmReqMsg struct {
 	req toolConfirmReq
 }
 
+// contextWindowMsg carries asynchronously resolved context-window metadata.
+type contextWindowMsg struct {
+	window contextwindow.Window
+}
+
+// compressMsg carries the result of an async context compression request.
+type compressMsg struct {
+	summary string
+	err     error
+}
+
 // overlayKind identifies which modal is active.
 type overlayKind int
 
@@ -72,6 +81,7 @@ const (
 	overlayTools
 	overlayLoops
 	overlayPrompt
+	overlayContext
 	overlaySessionInfo
 	overlayConfirm
 )
@@ -79,11 +89,13 @@ const (
 // model is the Bubble Tea model for the nncode TUI.
 type model struct {
 	// Core dependencies.
-	agent          *agent.Agent
-	cfg            *config.Config
-	sess           *session.Session
-	skillRegistry  *skills.Registry
-	skillActivator *skills.Activator
+	agent           *agent.Agent
+	cfg             *config.Config
+	sess            *session.Session
+	skillRegistry   *skills.Registry
+	skillActivator  *skills.Activator
+	contextWindow   contextwindow.Window
+	contextResolver func(context.Context) contextwindow.Window
 
 	// Bubbles components.
 	viewport viewport.Model
@@ -91,8 +103,9 @@ type model struct {
 	spinner  spinner.Model
 
 	// Conversation state.
-	messages []msgItem
-	running  bool
+	messages    []msgItem
+	running     bool
+	compressing bool
 
 	// Dimensions.
 	width  int
@@ -127,6 +140,8 @@ func newModel(
 	sess *session.Session,
 	reg *skills.Registry,
 	activator *skills.Activator,
+	window contextwindow.Window,
+	contextResolver func(context.Context) contextwindow.Window,
 ) *model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message or /help ..."
@@ -155,17 +170,19 @@ func newModel(
 	vp.Style = Body
 
 	mod := &model{
-		agent:          agentM,
-		cfg:            cfg,
-		sess:           sess,
-		skillRegistry:  reg,
-		skillActivator: activator,
-		viewport:       vp,
-		textarea:       ta,
-		spinner:        sp,
-		messages:       make([]msgItem, 0),
-		overlay:        overlayNone,
-		confirmReqCh:   make(chan toolConfirmReq),
+		agent:           agentM,
+		cfg:             cfg,
+		sess:            sess,
+		skillRegistry:   reg,
+		skillActivator:  activator,
+		contextWindow:   window,
+		contextResolver: contextResolver,
+		viewport:        vp,
+		textarea:        ta,
+		spinner:         sp,
+		messages:        make([]msgItem, 0),
+		overlay:         overlayNone,
+		confirmReqCh:    make(chan toolConfirmReq),
 	}
 
 	mod.agent.SetEffectfulToolConfirm(mod.effectfulToolConfirm)
@@ -173,19 +190,37 @@ func newModel(
 	return mod
 }
 
-// Init implements tea.Model.
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textarea.Blink,
 		m.spinner.Tick,
 		m.waitForConfirmReq(),
-	)
+	}
+
+	if cmd := m.resolveContextWindowCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (m *model) waitForConfirmReq() tea.Cmd {
 	return func() tea.Msg {
 		req := <-m.confirmReqCh
 		return confirmReqMsg{req: req}
+	}
+}
+
+func (m *model) resolveContextWindowCmd() tea.Cmd {
+	if m.contextResolver == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), contextwindow.DefaultResolveTimeout)
+		defer cancel()
+
+		return contextWindowMsg{window: m.contextResolver(ctx)}
 	}
 }
 
@@ -250,15 +285,14 @@ func (m *model) welcomeView() string {
 	}
 	cardWidth := innerWidth + sidePad*2
 
+	base := lipgloss.NewStyle().
+		Background(ColorBlack).
+		Width(cardWidth).
+		Align(lipgloss.Center)
+
 	rendered := make([]string, len(lines))
 	for i, line := range lines {
-		style := lipgloss.NewStyle().
-			Foreground(line.fg).
-			Background(ColorBlack).
-			Width(cardWidth).
-			Align(lipgloss.Center).
-			Bold(line.bold)
-		rendered[i] = style.Render(line.text)
+		rendered[i] = base.Foreground(line.fg).Bold(line.bold).Render(line.text)
 	}
 
 	card := strings.Join(rendered, "\n")
@@ -325,35 +359,6 @@ func (m *model) headerView() string {
 	return m.renderBar(HeaderBar, logo, info)
 }
 
-// tokenStats holds computed token totals.
-type tokenStats struct {
-	lastTurn     int
-	sessionTotal int
-	byModel      map[string]int
-}
-
-// computeTokenStats scans assistant messages for usage and per-model totals.
-func (m *model) computeTokenStats() tokenStats {
-	var stats tokenStats
-	stats.byModel = make(map[string]int)
-
-	for _, msg := range m.agent.Messages() {
-		if msg.Role == llm.RoleAssistant {
-			stats.sessionTotal += msg.Usage.TotalTokens
-			stats.byModel[msg.Model] += msg.Usage.TotalTokens
-		}
-	}
-
-	for i := len(m.agent.Messages()) - 1; i >= 0; i-- {
-		if m.agent.Messages()[i].Role == llm.RoleAssistant {
-			stats.lastTurn = m.agent.Messages()[i].Usage.TotalTokens
-			break
-		}
-	}
-
-	return stats
-}
-
 // statusView renders the status bar.
 func (m *model) statusView() string {
 	mode := "ready"
@@ -366,8 +371,8 @@ func (m *model) statusView() string {
 	barBG := StatusBar.GetBackground()
 	dot := lipgloss.NewStyle().Foreground(ColorCRTGreenDim).Background(barBG).Render("·")
 
-	stats := m.computeTokenStats()
-	turnTokens := stats.lastTurn
+	stats := contextstats.Compute(m.agent.Messages())
+	turnTokens := stats.LastTurnTokens
 	if m.running && m.inTurn {
 		estimate := m.turnTextLen / tokenEstimateDivisor
 		if estimate > turnTokens {
@@ -375,32 +380,43 @@ func (m *model) statusView() string {
 		}
 	}
 
-	tokenStr := formatTokenCount(turnTokens) + " / " + formatTokenCount(stats.sessionTotal)
+	tokenStr := formatTokenCount(turnTokens) + " / " + formatTokenCount(stats.SessionTokens)
+	const contextWarningThreshold = 0.8
+	contextStr := stats.ContextUsage(m.contextWindow)
+	if stats.ContextRatio(m.contextWindow) >= contextWarningThreshold {
+		contextStr = lipgloss.NewStyle().Foreground(ColorWarningAmber).Render(contextStr)
+	}
 
-	left := StatusKey.Render("MODE") + barSpacer(1, barBG) + StatusValue.Render(mode) +
-		barSpacer(2, barBG) + dot + barSpacer(2, barBG) +
-		StatusKey.Render("MSGS") + barSpacer(1, barBG) +
-		StatusValue.Render(strconv.Itoa(len(m.agent.Messages()))) +
-		barSpacer(2, barBG) + dot + barSpacer(2, barBG) +
-		StatusKey.Render("TOKENS") + barSpacer(1, barBG) +
-		StatusValue.Render(tokenStr)
+	leftSep := barSpacer(2, barBG) + dot + barSpacer(2, barBG)
+	left := joinStatusPairs(barBG, leftSep, [][2]string{
+		{"MODE", mode},
+		{"MSGS", strconv.Itoa(len(m.agent.Messages()))},
+		{"TOKENS", tokenStr},
+		{"CTX", contextStr},
+	})
 
-	right := StatusKey.Render("?") + barSpacer(1, barBG) + StatusValue.Render("help") +
-		barSpacer(groupGap, barBG) +
-		StatusKey.Render("ctrl+c") + barSpacer(1, barBG) + StatusValue.Render("quit")
+	right := joinStatusPairs(barBG, barSpacer(groupGap, barBG), [][2]string{
+		{"?", "help"},
+		{"ctrl+c", "quit"},
+	})
 
 	return m.renderBar(StatusBar, left, right)
 }
 
+// joinStatusPairs renders [{key,val}, ...] with a one-cell bg-filled gap
+// between each key and its value, joined by sep.
+func joinStatusPairs(barBG lipgloss.TerminalColor, sep string, pairs [][2]string) string {
+	kvGap := barSpacer(1, barBG)
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = StatusKey.Render(p[0]) + kvGap + StatusValue.Render(p[1])
+	}
+	return strings.Join(parts, sep)
+}
+
 // formatTokenCount returns a compact human-readable token count.
 func formatTokenCount(n int) string {
-	if n >= tokenMillion {
-		return fmt.Sprintf("%.1fM", float64(n)/tokenMillion)
-	}
-	if n >= tokenThousand {
-		return fmt.Sprintf("%.1fk", float64(n)/tokenThousand)
-	}
-	return strconv.Itoa(n)
+	return contextwindow.FormatTokenCount(n)
 }
 
 // renderBar lays out a full-width bar with left content, a flexible spacer,

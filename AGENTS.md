@@ -6,6 +6,13 @@ nncode is a minimal coding agent written in Go. It runs an agent loop: prompt ->
 
 Keep the scope tight. It is a CLI that streams responses to stdout, with an optional Bubble Tea TUI for interactive terminal sessions.
 
+## Product principles
+
+- **Deployability first.** One Go binary, zero runtime dependencies. It runs in containers, CI images, and air-gapped networks without package managers or Node/Python stacks.
+- **Auditability by default.** Every turn is a JSONL session. Every tool call is recorded. If you can't diff it, debug it, or replay it, the feature does not belong here.
+- **Do not chase features.** Git integration, web search, and MCP are deliberately out of scope. nncode wins on being small, inspectable, and deterministic — not on feature parity with heavier alternatives.
+- **Minimalism is a ceiling and a floor.** The tool set is intentionally small. Additions must prove they sharpen deployability or auditability; convenience alone is not enough.
+
 > **Design reference:** For visual identity, color system, typography, and CRT styling rules, see [`DESIGN.md`](DESIGN.md). Agents working on TUI, branding, or terminal visuals should read it before making changes.
 
 ## Build & test
@@ -79,15 +86,19 @@ Agents editing user-facing behavior should know these exist:
 - `-resume <id|path>` loads a saved session before the first prompt
 - `-loop <name|path>` runs a configured Agent Loop in piped mode
 - `-loop-check <name|path>` validates a configured Agent Loop and exits without a model request
-- `nncode loop list|check|run` exposes Agent Loop list, validation, and piped-run workflows for scripts
+- `-confirm` requires explicit confirmation for effectful tools; in piped mode it skips them unless `-no-confirm` is also passed
+- `-no-confirm` explicitly allows effectful tools without confirmation (pairs with `-confirm`)
 - `-strict` only affects piped mode; it returns non-zero for incomplete turns with no assistant response and no successful effectful tool call
 - `-check` runs local setup diagnostics; `nncode doctor [-model <name>] [-live] [-timeout <duration>]` is the fuller diagnostics command and warns on invalid configured Agent Loops
+- `nncode loop list|check|run` exposes Agent Loop list, validation, and piped-run workflows for scripts
+- `nncode session show|export|changes <id|path>` inspects saved sessions: show prints context, export renders Markdown, changes lists effectful tool calls
 - `~/.nncode/config.json` (global) and `./.nncode/config.json` (project-local) overlay built-in defaults; partial configs work
 - `~/.nncode/system_prompt.md` and `./.nncode/system_prompt.md` override the default system prompt; project-local wins
 - `OPENAI_API_KEY` env var is the only credential source
 - Tool names that can be disabled in config: `read`, `write`, `edit`, `patch`, `bash`, `grep`, `find`
 - `-dry-run` previews effectful tool calls (`write`, `edit`, `patch`, `bash`) and Agent Loop `cmd` nodes without executing them; `read`, `grep`, `find`, and `activate_skill` still run normally
-- Slash commands in interactive mode: `/help`, `/quit`, `/exit`, `/reset`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/loops`, `/loop`, `/loop-validate`, `/prompt`
+- Model config fields: `context_window` (manual context size fallback) and `context_probe` (`auto`, `off`, `llamacpp`) control live metadata probing
+- Slash commands in interactive mode: `/help`, `/quit`, `/exit`, `/reset`, `/context -print|-reset`, `/compress`, `/session`, `/sessions`, `/resume`, `/tools`, `/skills`, `/skill:name`, `/loops`, `/loop`, `/loop-validate`, `/prompt`
 
 ## Agent Skills
 

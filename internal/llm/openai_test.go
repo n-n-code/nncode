@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -491,4 +494,136 @@ func TestBuildRequestBody_ToolMessages(t *testing.T) {
 	if string(decoded.Tools[0].Function.Parameters) != `{"type":"object"}` {
 		t.Errorf("tool parameters = %s", string(decoded.Tools[0].Function.Parameters))
 	}
+}
+
+func TestIsRetryableError_RetryableStatusCodes(t *testing.T) {
+	retryable := []int{429, 502, 503, 504}
+	for _, code := range retryable {
+		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
+			assert.True(t, isRetryableError(nil, code))
+		})
+	}
+}
+
+func TestIsRetryableError_NonRetryableStatusCodes(t *testing.T) {
+	nonRetryable := []int{200, 400, 401, 403, 404, 500}
+	for _, code := range nonRetryable {
+		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
+			assert.False(t, isRetryableError(nil, code))
+		})
+	}
+}
+
+func TestIsRetryableError_ContextErrors(t *testing.T) {
+	assert.False(t, isRetryableError(context.Canceled, 0))
+	assert.False(t, isRetryableError(context.DeadlineExceeded, 0))
+}
+
+func TestDoWithRetry_SucceedsOnFirstAttempt(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://test", nil)
+	resp, err := doWithRetry(context.Background(), client, req)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+}
+
+func TestDoWithRetry_RetriesThenSucceeds(t *testing.T) {
+	var attempts int
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			attempts++
+			if attempts < 2 {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader("rate limited")),
+				}, nil
+			}
+
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://test", nil)
+	resp, err := doWithRetry(context.Background(), client, req)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, attempts)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+}
+
+func TestDoWithRetry_ExhaustsRetries(t *testing.T) {
+	var attempts int
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			attempts++
+
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Body:       io.NopCloser(strings.NewReader("unavailable")),
+			}, nil
+		}),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://test", nil)
+	//nolint:bodyclose // doWithRetry closes non-OK response bodies internally.
+	_, err := doWithRetry(context.Background(), client, req)
+
+	require.Error(t, err)
+	assert.Equal(t, maxRetries+1, attempts)
+	assert.Contains(t, err.Error(), "503")
+}
+
+func TestDoWithRetry_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, context.Canceled
+		}),
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://test", nil)
+	resp, err := doWithRetry(ctx, client, req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestDoWithRetry_ResetsRequestBodyOnRetry(t *testing.T) {
+	var bodies []string
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(body))
+			if len(bodies) < 2 {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader("rate limited")),
+				}, nil
+			}
+
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://test", strings.NewReader("payload"))
+	resp, err := doWithRetry(context.Background(), client, req)
+
+	require.NoError(t, err)
+	assert.Len(t, bodies, 2)
+	assert.Equal(t, "payload", bodies[0])
+	assert.Equal(t, "payload", bodies[1])
+	require.NoError(t, resp.Body.Close())
 }

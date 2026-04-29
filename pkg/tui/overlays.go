@@ -14,6 +14,9 @@ import (
 
 	"nncode/internal/agent"
 	"nncode/internal/agentloop"
+	"nncode/internal/contextprint"
+	"nncode/internal/contextstats"
+	"nncode/internal/contextwindow"
 	"nncode/internal/llm"
 	"nncode/internal/session"
 )
@@ -90,45 +93,37 @@ func (m *model) selectOverlayItem() (*model, tea.Cmd) {
 	//nolint:exhaustive // All relevant overlay kinds are handled.
 	switch m.overlay {
 	case overlaySessions:
-		if m.overlayIndex < len(m.overlayItems) {
-			// Items are formatted like "id  messages  path"
-			fields := strings.Fields(m.overlayItems[m.overlayIndex])
-			if len(fields) > 0 {
-				m.dismissOverlay()
-				m.resumeSession(fields[0])
-			}
-		}
-	case overlaySkills:
-		if m.overlayIndex < len(m.overlayItems) {
-			fields := strings.Fields(m.overlayItems[m.overlayIndex])
-			if len(fields) > 0 {
-				name := fields[0]
-				m.dismissOverlay()
-				_, cmd := m.handleSkillCommand("/skill:" + name)
-
-				return m, cmd
-			}
-		}
-	case overlayLoops:
-		if m.overlayIndex < len(m.loopSummaries) {
-			summary := m.loopSummaries[m.overlayIndex]
-			if summary.Err != nil {
-				m.appendMessage(msgItem{Kind: kindError, Text: "Agent Loop invalid: " + summary.Err.Error()})
-
-				return m, nil
-			}
-
+		if first := m.selectedItemFirstField(); first != "" {
 			m.dismissOverlay()
-
-			updated, cmd := m.handleLoopCommand("/loop " + summary.Ref)
-			next, ok := updated.(*model)
-			if !ok {
-				return m, cmd
-			}
-
-			return next, cmd
+			m.resumeSession(first)
 		}
-	case overlayHelp, overlayTools, overlayPrompt, overlaySessionInfo:
+
+		return m, nil
+	case overlaySkills:
+		if first := m.selectedItemFirstField(); first != "" {
+			m.dismissOverlay()
+			_, cmd := m.handleSkillCommand("/skill:" + first)
+
+			return m, cmd
+		}
+
+		return m, nil
+	case overlayLoops:
+		if m.overlayIndex >= len(m.loopSummaries) {
+			return m, nil
+		}
+
+		summary := m.loopSummaries[m.overlayIndex]
+		if summary.Err != nil {
+			m.appendMessage(msgItem{Kind: kindError, Text: "Agent Loop invalid: " + summary.Err.Error()})
+
+			return m, nil
+		}
+
+		m.dismissOverlay()
+
+		return m.handleLoopCommand("/loop " + summary.Ref)
+	case overlayHelp, overlayTools, overlayPrompt, overlayContext, overlaySessionInfo:
 		m.dismissOverlay()
 	case overlayConfirm:
 		// Unreachable: confirm overlay key handler returns before this switch.
@@ -138,6 +133,20 @@ func (m *model) selectOverlayItem() (*model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// selectedItemFirstField returns the first whitespace-delimited token of the
+// currently highlighted overlay row, or "" when the row is missing or empty.
+func (m *model) selectedItemFirstField() string {
+	if m.overlayIndex >= len(m.overlayItems) {
+		return ""
+	}
+	fields := strings.Fields(m.overlayItems[m.overlayIndex])
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return fields[0]
 }
 
 func (m *model) dismissOverlay() {
@@ -158,12 +167,14 @@ func (m *model) openSessionOverlay() {
 		"ID:       " + m.sess.ID,
 		"Messages: " + strconv.Itoa(len(m.agent.Messages())),
 	}
-	stats := m.computeTokenStats()
-	items = append(items, "Tokens (last turn): "+strconv.Itoa(stats.lastTurn))
-	items = append(items, "Tokens (session):   "+strconv.Itoa(stats.sessionTotal))
-	if len(stats.byModel) > 0 {
+	stats := contextstats.Compute(m.agent.Messages())
+	items = append(items, "Tokens (last turn): "+strconv.Itoa(stats.LastTurnTokens))
+	items = append(items, "Tokens (session):   "+strconv.Itoa(stats.SessionTokens))
+	items = append(items, "Context: "+stats.ContextUsage(m.contextWindow))
+	items = append(items, "Context source: "+contextwindow.FormatSource(m.contextWindow))
+	if len(stats.ByModel) > 0 {
 		items = append(items, "Per model:")
-		for modelID, count := range stats.byModel {
+		for modelID, count := range stats.ByModel {
 			items = append(items, "  "+modelID+": "+strconv.Itoa(count))
 		}
 	}
@@ -191,6 +202,15 @@ func (m *model) openSessionOverlay() {
 	m.overlayItems = items
 	m.overlayIndex = 0
 	m.overlay = overlaySessionInfo
+}
+
+func (m *model) openContextOverlay() {
+	m.overlayItems = []string{
+		contextprint.StoredContextNote,
+		"",
+		contextprint.Format(m.agent.SystemPrompt(), m.agent.Messages()),
+	}
+	m.showOverlay(overlayContext)
 }
 
 // loadSessionsOverlay populates the overlay with saved sessions.
@@ -236,8 +256,15 @@ func (m *model) loadSessionsOverlay() {
 			fmt.Sprintf("%-12s %3d msgs %6s %10s %4s  %s",
 				id, len(loaded.Messages), formatTokenCount(tokens), modelStr, age, preview))
 	}
+	m.showOverlay(overlaySessions)
+}
+
+// showOverlay finalizes a load* helper by resetting the cursor and revealing
+// the overlay. Callers must have already populated m.overlayItems (and
+// m.loopSummaries when applicable).
+func (m *model) showOverlay(kind overlayKind) {
 	m.overlayIndex = 0
-	m.overlay = overlaySessions
+	m.overlay = kind
 }
 
 // formatAge returns a compact human-readable duration.
@@ -272,39 +299,25 @@ func firstUserPreview(msgs []llm.Message) string {
 
 // sessionStats computes total tokens and the dominant model from a session.
 func sessionStats(msgs []llm.Message) (int, string) {
-	var total int
-	var dominant string
-	byModel := make(map[string]int)
-	for _, msg := range msgs {
-		if msg.Role == llm.RoleAssistant {
-			total += msg.Usage.TotalTokens
-			byModel[msg.Model] += msg.Usage.TotalTokens
-		}
-	}
-	most := 0
-	for model, count := range byModel {
-		if count > most {
-			most = count
-			dominant = model
-		}
-	}
-	return total, dominant
+	stats := contextstats.Compute(msgs)
+
+	return stats.SessionTokens, stats.DominantModel()
 }
 
 // loadToolsOverlay populates the overlay with available tools.
 func (m *model) loadToolsOverlay() {
-	if len(m.agent.Tools()) == 0 {
+	tools := m.agent.Tools()
+	if len(tools) == 0 {
 		m.appendMessage(msgItem{Kind: kindAssistant, Text: "No tools available."})
 		return
 	}
 
-	m.overlayItems = make([]string, 0, len(m.agent.Tools()))
-	for _, tool := range m.agent.Tools() {
+	m.overlayItems = make([]string, 0, len(tools))
+	for _, tool := range tools {
 		m.overlayItems = append(m.overlayItems,
 			fmt.Sprintf("%-12s %s", tool.Name, tool.Description))
 	}
-	m.overlayIndex = 0
-	m.overlay = overlayTools
+	m.showOverlay(overlayTools)
 }
 
 // loadSkillsOverlay populates the overlay with discovered skills.
@@ -314,8 +327,9 @@ func (m *model) loadSkillsOverlay() {
 		return
 	}
 
-	m.overlayItems = make([]string, 0, len(m.skillRegistry.Skills()))
-	for _, skill := range m.skillRegistry.Skills() {
+	skills := m.skillRegistry.Skills()
+	m.overlayItems = make([]string, 0, len(skills))
+	for _, skill := range skills {
 		visibility := "model"
 		if skill.DisableModelInvocation {
 			visibility = "manual"
@@ -324,8 +338,7 @@ func (m *model) loadSkillsOverlay() {
 			fmt.Sprintf("%-20s [%s] %s", skill.Name, visibility,
 				truncateInline(skill.Description, descriptionPreviewLen)))
 	}
-	m.overlayIndex = 0
-	m.overlay = overlaySkills
+	m.showOverlay(overlaySkills)
 }
 
 func (m *model) loadLoopsOverlay() {
@@ -365,8 +378,7 @@ func (m *model) loadLoopsOverlay() {
 			fmt.Sprintf("%-20s [%s] OK  %s", summary.Ref, summary.Scope,
 				truncateInline(description, descriptionPreviewLen)))
 	}
-	m.overlayIndex = 0
-	m.overlay = overlayLoops
+	m.showOverlay(overlayLoops)
 }
 
 //nolint:gochecknoglobals // Static lookup table for overlayKind→title.
@@ -377,6 +389,7 @@ var overlayTitles = map[overlayKind]string{
 	overlayTools:       "Tools",
 	overlayLoops:       "Agent Loops",
 	overlayPrompt:      "System Prompt",
+	overlayContext:     "Context",
 	overlaySessionInfo: "Session",
 	// overlayConfirm intentionally omitted; confirmOverlayContent renders a
 	// dynamic title that includes the turn number.
@@ -529,6 +542,8 @@ func (m *model) helpOverlayContent(width, height int) string {
 		{"/help", "Show this help"},
 		{"/quit, /exit", "Exit the agent"},
 		{"/reset", "Clear conversation history"},
+		{"/context -print|-reset", "Print or reset stored context"},
+		{"/compress", "Compress context into a summary"},
 		{"/session", "Show current session info"},
 		{"/sessions", "List saved sessions"},
 		{"/resume <id|path>", "Load a saved session"},
@@ -595,7 +610,7 @@ func (m *model) overlayRows(width int) []string {
 		return helpOverlayItems()
 	}
 
-	if m.overlay != overlayPrompt {
+	if m.overlay != overlayPrompt && m.overlay != overlayContext {
 		return m.overlayItems
 	}
 
@@ -946,6 +961,8 @@ func helpOverlayItems() []string {
 		"/help              Show this help",
 		"/quit, /exit       Exit the agent",
 		"/reset             Clear conversation history",
+		"/context -print|-reset Print or reset stored context",
+		"/compress          Compress context into a summary",
 		"/session           Show current session info",
 		"/sessions          List saved sessions",
 		"/resume <id|path>  Load a saved session",
