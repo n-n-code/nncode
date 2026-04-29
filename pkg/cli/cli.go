@@ -17,6 +17,7 @@ import (
 	"nncode/internal/agent"
 	"nncode/internal/agentloop"
 	"nncode/internal/config"
+	"nncode/internal/llm"
 	"nncode/internal/session"
 	"nncode/internal/skills"
 )
@@ -556,8 +557,28 @@ func (c *CLI) runEvents(events <-chan agent.Event) promptOutcome {
 	}
 
 	c.sess.Messages = c.agent.Messages()
+	c.printTokenSummary()
 
 	return outcome
+}
+
+// printTokenSummary prints a compact token usage line if any tokens were consumed.
+func (c *CLI) printTokenSummary() {
+	var sessionTotal, lastTurn int
+	for _, msg := range c.agent.Messages() {
+		if msg.Role == llm.RoleAssistant {
+			sessionTotal += msg.Usage.TotalTokens
+		}
+	}
+	for i := len(c.agent.Messages()) - 1; i >= 0; i-- {
+		if c.agent.Messages()[i].Role == llm.RoleAssistant {
+			lastTurn = c.agent.Messages()[i].Usage.TotalTokens
+			break
+		}
+	}
+	if sessionTotal > 0 {
+		fmt.Fprintf(c.out, "\033[2m[Tokens: %d this turn / %d session]\033[0m\n", lastTurn, sessionTotal)
+	}
 }
 
 func (c *CLI) renderLoopEvent(ev agent.Event) {

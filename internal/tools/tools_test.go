@@ -510,3 +510,57 @@ func TestFind_WorkspaceRootRestriction(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Content, "outside workspace root")
 }
+
+func TestTree_Defaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "src"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "src", "main.go"), []byte("package main"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# hello"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"path": tmpDir})
+	result, err := Tree().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "README.md")
+	assert.Contains(t, result.Content, "src/")
+	assert.Contains(t, result.Content, "main.go")
+}
+
+func TestTree_RespectsGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("node_modules\n"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "node_modules"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "node_modules", "x.js"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "app.js"), []byte("app"), 0644))
+
+	args, _ := json.Marshal(map[string]string{"path": tmpDir})
+	result, err := Tree().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "app.js")
+	assert.NotContains(t, result.Content, "node_modules")
+}
+
+func TestTree_DepthLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "a", "b"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "a", "b", "deep.txt"), []byte("x"), 0644))
+
+	args, _ := json.Marshal(map[string]any{"path": tmpDir, "depth": 1})
+	result, err := Tree().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, result.Content, "a/")
+	assert.NotContains(t, result.Content, "deep.txt")
+}
+
+func TestTree_InvalidPath(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"path": "/nonexistent/tree/path"})
+	result, err := Tree().Execute(context.Background(), args)
+
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+}

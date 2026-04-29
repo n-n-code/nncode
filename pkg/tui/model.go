@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 	"nncode/internal/agent"
 	"nncode/internal/agentloop"
 	"nncode/internal/config"
+	"nncode/internal/llm"
 	"nncode/internal/session"
 	"nncode/internal/skills"
 )
@@ -36,7 +38,28 @@ const (
 	overlayVerticalFrame  = 4
 	barHorizontalPadding  = 1 // matches Padding(0, 1) on HeaderBar/StatusBar.
 	dividersInFrame       = 3
+
+	// tokenEstimateDivisor is the rough chars-per-token heuristic used for
+	// live completion-token estimates while the stream is in progress.
+	tokenEstimateDivisor = 4
+	// token formatting thresholds.
+	tokenThousand = 1_000
+	tokenMillion  = 1_000_000
 )
+
+// toolConfirmReq carries an effectful tool confirmation request from the agent.
+type toolConfirmReq struct {
+	Name string
+	Args string
+	Turn int
+	Resp chan agent.ConfirmDecision
+}
+
+// confirmReqMsg is delivered into the Bubble Tea loop when the agent asks for
+// confirmation before executing an effectful tool.
+type confirmReqMsg struct {
+	req toolConfirmReq
+}
 
 // overlayKind identifies which modal is active.
 type overlayKind int
@@ -50,6 +73,7 @@ const (
 	overlayLoops
 	overlayPrompt
 	overlaySessionInfo
+	overlayConfirm
 )
 
 // model is the Bubble Tea model for the nncode TUI.
@@ -81,7 +105,13 @@ type model struct {
 	loopSummaries []agentloop.Summary
 
 	// Streaming state.
-	eventCh <-chan agent.Event
+	eventCh     <-chan agent.Event
+	turnTextLen int
+	inTurn      bool
+
+	// Effectful tool confirmation.
+	confirmReqCh   chan toolConfirmReq
+	pendingConfirm *toolConfirmReq
 
 	// Turn cancellation.
 	runCancel context.CancelFunc
@@ -124,7 +154,7 @@ func newModel(
 	vp := viewport.New(defaultTermWidth, defaultVPHHeight)
 	vp.Style = Body
 
-	return &model{
+	mod := &model{
 		agent:          agentM,
 		cfg:            cfg,
 		sess:           sess,
@@ -135,7 +165,12 @@ func newModel(
 		spinner:        sp,
 		messages:       make([]msgItem, 0),
 		overlay:        overlayNone,
+		confirmReqCh:   make(chan toolConfirmReq),
 	}
+
+	mod.agent.SetEffectfulToolConfirm(mod.effectfulToolConfirm)
+
+	return mod
 }
 
 // Init implements tea.Model.
@@ -143,7 +178,15 @@ func (m *model) Init() tea.Cmd {
 	return tea.Batch(
 		textarea.Blink,
 		m.spinner.Tick,
+		m.waitForConfirmReq(),
 	)
+}
+
+func (m *model) waitForConfirmReq() tea.Cmd {
+	return func() tea.Msg {
+		req := <-m.confirmReqCh
+		return confirmReqMsg{req: req}
+	}
 }
 
 // recalcLayout sets viewport and textarea sizes based on current terminal dimensions.
@@ -248,6 +291,19 @@ func (m *model) updateLastAssistantText(text string) {
 	m.syncViewportContent()
 }
 
+// effectfulToolConfirm is the callback registered with the agent. It blocks
+// until the user responds via the TUI confirmation overlay.
+func (m *model) effectfulToolConfirm(ctx context.Context, req agent.ConfirmRequest) (agent.ConfirmDecision, error) {
+	resp := make(chan agent.ConfirmDecision, 1)
+	m.confirmReqCh <- toolConfirmReq{Name: req.Name, Args: req.Args, Turn: req.Turn, Resp: resp}
+	select {
+	case <-ctx.Done():
+		return agent.ConfirmStop, fmt.Errorf("confirmation cancelled: %w", ctx.Err())
+	case r := <-resp:
+		return r, nil
+	}
+}
+
 // saveSession persists the current session if there are messages.
 func (m *model) saveSession() {
 	m.sess.Messages = m.agent.Messages()
@@ -269,6 +325,35 @@ func (m *model) headerView() string {
 	return m.renderBar(HeaderBar, logo, info)
 }
 
+// tokenStats holds computed token totals.
+type tokenStats struct {
+	lastTurn     int
+	sessionTotal int
+	byModel      map[string]int
+}
+
+// computeTokenStats scans assistant messages for usage and per-model totals.
+func (m *model) computeTokenStats() tokenStats {
+	var stats tokenStats
+	stats.byModel = make(map[string]int)
+
+	for _, msg := range m.agent.Messages() {
+		if msg.Role == llm.RoleAssistant {
+			stats.sessionTotal += msg.Usage.TotalTokens
+			stats.byModel[msg.Model] += msg.Usage.TotalTokens
+		}
+	}
+
+	for i := len(m.agent.Messages()) - 1; i >= 0; i-- {
+		if m.agent.Messages()[i].Role == llm.RoleAssistant {
+			stats.lastTurn = m.agent.Messages()[i].Usage.TotalTokens
+			break
+		}
+	}
+
+	return stats
+}
+
 // statusView renders the status bar.
 func (m *model) statusView() string {
 	mode := "ready"
@@ -281,16 +366,41 @@ func (m *model) statusView() string {
 	barBG := StatusBar.GetBackground()
 	dot := lipgloss.NewStyle().Foreground(ColorCRTGreenDim).Background(barBG).Render("·")
 
+	stats := m.computeTokenStats()
+	turnTokens := stats.lastTurn
+	if m.running && m.inTurn {
+		estimate := m.turnTextLen / tokenEstimateDivisor
+		if estimate > turnTokens {
+			turnTokens = estimate
+		}
+	}
+
+	tokenStr := formatTokenCount(turnTokens) + " / " + formatTokenCount(stats.sessionTotal)
+
 	left := StatusKey.Render("MODE") + barSpacer(1, barBG) + StatusValue.Render(mode) +
 		barSpacer(2, barBG) + dot + barSpacer(2, barBG) +
 		StatusKey.Render("MSGS") + barSpacer(1, barBG) +
-		StatusValue.Render(strconv.Itoa(len(m.agent.Messages())))
+		StatusValue.Render(strconv.Itoa(len(m.agent.Messages()))) +
+		barSpacer(2, barBG) + dot + barSpacer(2, barBG) +
+		StatusKey.Render("TOKENS") + barSpacer(1, barBG) +
+		StatusValue.Render(tokenStr)
 
 	right := StatusKey.Render("?") + barSpacer(1, barBG) + StatusValue.Render("help") +
 		barSpacer(groupGap, barBG) +
 		StatusKey.Render("ctrl+c") + barSpacer(1, barBG) + StatusValue.Render("quit")
 
 	return m.renderBar(StatusBar, left, right)
+}
+
+// formatTokenCount returns a compact human-readable token count.
+func formatTokenCount(n int) string {
+	if n >= tokenMillion {
+		return fmt.Sprintf("%.1fM", float64(n)/tokenMillion)
+	}
+	if n >= tokenThousand {
+		return fmt.Sprintf("%.1fk", float64(n)/tokenThousand)
+	}
+	return strconv.Itoa(n)
 }
 
 // renderBar lays out a full-width bar with left content, a flexible spacer,

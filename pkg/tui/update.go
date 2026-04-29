@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -42,6 +41,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.sess.Messages = m.agent.Messages()
 		m.textarea.Focus()
+
+	case confirmReqMsg:
+		m.pendingConfirm = &msg.req
+		m.overlay = overlayConfirm
 
 	default:
 		// Let bubbles handle their own messages (cursor blink, spinner tick, etc.).
@@ -214,18 +217,11 @@ func (m *model) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.sess = session.New()
 		m.messages = nil
+		m.turnTextLen = 0
+		m.inTurn = false
 		m.syncViewportContent()
 	case "/session":
-		items := []string{
-			"ID:       " + m.sess.ID,
-			"Messages: " + strconv.Itoa(len(m.agent.Messages())),
-		}
-		if m.sess.FilePath != "" {
-			items = append(items, "File:     "+m.sess.FilePath)
-		}
-		m.overlayItems = items
-		m.overlayIndex = 0
-		m.overlay = overlaySessionInfo
+		m.openSessionOverlay()
 	case "/sessions":
 		m.loadSessionsOverlay()
 	case "/resume":
@@ -373,6 +369,7 @@ func (m *model) handleSkillCommand(line string) (tea.Model, tea.Cmd) {
 func (m *model) handleAgentEvent(ev agent.Event) {
 	switch ev.Type {
 	case agent.EventText:
+		m.turnTextLen += len(ev.Text)
 		m.updateLastAssistantText(ev.Text)
 	case agent.EventToolCallStart:
 		m.appendMessage(msgItem{Kind: kindToolCall, ToolName: ev.ToolName})
@@ -402,16 +399,19 @@ func (m *model) handleAgentEvent(ev agent.Event) {
 		} else {
 			m.appendMessage(msgItem{Kind: kindError, Text: ev.Err.Error()})
 		}
+	case agent.EventTurnStart:
+		m.turnTextLen = 0
+		m.inTurn = true
+	case agent.EventTurnEnd:
+		m.inTurn = false
 	case agent.EventDone:
-		// no-op
+		m.inTurn = false
 	case agent.EventLoopStart,
 		agent.EventLoopIterationStart,
 		agent.EventLoopNodeStart,
 		agent.EventLoopNodeEnd,
 		agent.EventLoopExitDecision:
 		m.appendLoopStatus(ev)
-	case agent.EventTurnStart, agent.EventTurnEnd:
-		// no-op
 	default:
 		// no-op
 	}

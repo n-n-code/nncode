@@ -514,9 +514,14 @@ func (r Runner) runOptions(def Definition, node Node, loopContext string) (agent
 	}
 
 	scopedMessages := []string{loopContext}
+	metadata := map[string]any{
+		"loop_name":      def.Name,
+		"loop_node_id":   node.ID,
+		"loop_node_type": string(node.Type),
+	}
 
 	if modelName == "" {
-		return agent.RunOptions{ScopedSystemMessages: scopedMessages}, nil
+		return agent.RunOptions{ScopedSystemMessages: scopedMessages, Metadata: metadata}, nil
 	}
 
 	if r.Config == nil {
@@ -537,6 +542,7 @@ func (r Runner) runOptions(def Definition, node Node, loopContext string) (agent
 		Model:                llm.Model{ID: modelCfg.RequestID(modelName), BaseURL: modelCfg.BaseURL},
 		MaxTokens:            modelCfg.MaxTokens,
 		ScopedSystemMessages: scopedMessages,
+		Metadata:             metadata,
 	}, nil
 }
 

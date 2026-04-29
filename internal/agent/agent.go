@@ -22,15 +22,36 @@ const (
 
 var errMaxTurnsExceeded = errors.New("max turns exceeded")
 
+// ConfirmDecision is the user's response to an effectful-tool confirmation.
+type ConfirmDecision int
+
+const (
+	// ConfirmAllow runs the tool as requested.
+	ConfirmAllow ConfirmDecision = iota
+	// ConfirmSkip cancels just this tool call so the agent can try another path.
+	ConfirmSkip
+	// ConfirmStop halts the run cleanly; remaining effectful calls in the same
+	// turn are also skipped and no further LLM turns are issued.
+	ConfirmStop
+)
+
+// ConfirmRequest is the payload passed to an EffectfulToolConfirm callback.
+type ConfirmRequest struct {
+	Name string
+	Args string
+	Turn int
+}
+
 type Config struct {
-	Model       llm.Model
-	Client      llm.Client
-	APIKey      string
-	Tools       []Tool
-	MaxTurns    int
-	MaxTokens   int
-	Temperature float64
-	DryRun      bool
+	Model                llm.Model
+	Client               llm.Client
+	APIKey               string
+	Tools                []Tool
+	MaxTurns             int
+	MaxTokens            int
+	Temperature          float64
+	DryRun               bool
+	EffectfulToolConfirm func(ctx context.Context, req ConfirmRequest) (ConfirmDecision, error)
 }
 
 // RunOptions applies to one RunWithOptions call without changing the agent's
@@ -39,6 +60,7 @@ type RunOptions struct {
 	Model                llm.Model
 	MaxTokens            int
 	ScopedSystemMessages []string
+	Metadata             map[string]any
 }
 
 type Agent struct {
@@ -68,6 +90,9 @@ func (a *Agent) Model() llm.Model         { return a.cfg.Model }
 func (a *Agent) SetModel(m llm.Model)     { a.cfg.Model = m }
 func (a *Agent) SetAPIKey(k string)       { a.cfg.APIKey = k }
 func (a *Agent) DryRun() bool             { return a.cfg.DryRun }
+func (a *Agent) SetEffectfulToolConfirm(fn func(ctx context.Context, req ConfirmRequest) (ConfirmDecision, error)) {
+	a.cfg.EffectfulToolConfirm = fn
+}
 func (a *Agent) AddSystemMessage(content string) {
 	a.addMessage(llm.RoleSystem, content)
 }

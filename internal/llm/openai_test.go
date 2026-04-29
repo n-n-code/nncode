@@ -299,6 +299,126 @@ func (b cancelBody) Close() error {
 	return nil
 }
 
+func TestStream_UsageOnEmptyChunkNoDone(t *testing.T) {
+	// Some providers (e.g., Ollama with certain configs) send usage on an
+	// empty-choices chunk and omit the [DONE] sentinel.
+	chunks := []string{
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n",
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n",
+	}
+
+	c := newStreamClient(t, http.StatusOK, strings.Join(chunks, ""), nil)
+
+	ch, err := c.Stream(context.Background(), Request{
+		Model: Model{ID: "gpt-test", BaseURL: "http://example.test"},
+		Messages: []Message{
+			{Role: RoleUser, Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := collectEvents(t, ch)
+
+	var done *Done
+	for _, ev := range events {
+		if ev.Done != nil {
+			done = ev.Done
+		}
+		if ev.Err != nil {
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+
+	if done == nil {
+		t.Fatal("expected Done event")
+	}
+	if done.Usage.TotalTokens != 6 {
+		t.Errorf("Usage.TotalTokens = %d, want 6", done.Usage.TotalTokens)
+	}
+}
+
+func TestStream_UsageBeforeFinishReason(t *testing.T) {
+	// Provider sends usage on a chunk that still carries a finish_reason.
+	chunks := []string{
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n",
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n",
+		"data: [DONE]\n",
+	}
+
+	c := newStreamClient(t, http.StatusOK, strings.Join(chunks, ""), nil)
+
+	ch, err := c.Stream(context.Background(), Request{
+		Model: Model{ID: "gpt-test", BaseURL: "http://example.test"},
+		Messages: []Message{
+			{Role: RoleUser, Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := collectEvents(t, ch)
+
+	var done *Done
+	for _, ev := range events {
+		if ev.Done != nil {
+			done = ev.Done
+		}
+		if ev.Err != nil {
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+
+	if done == nil {
+		t.Fatal("expected Done event")
+	}
+	if done.Usage.TotalTokens != 6 {
+		t.Errorf("Usage.TotalTokens = %d, want 6", done.Usage.TotalTokens)
+	}
+	if done.StopReason != "stop" {
+		t.Errorf("StopReason = %q, want stop", done.StopReason)
+	}
+}
+
+func TestStream_EmptyDeltaChunks(t *testing.T) {
+	// Provider sends empty delta chunks before real content.
+	chunks := []string{
+		"data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n",
+		"data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n",
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n",
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
+		"data: [DONE]\n",
+	}
+
+	c := newStreamClient(t, http.StatusOK, strings.Join(chunks, ""), nil)
+
+	ch, err := c.Stream(context.Background(), Request{
+		Model: Model{ID: "gpt-test", BaseURL: "http://example.test"},
+		Messages: []Message{
+			{Role: RoleUser, Content: "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	events := collectEvents(t, ch)
+
+	var text strings.Builder
+	for _, ev := range events {
+		text.WriteString(ev.Text)
+		if ev.Err != nil {
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+	}
+
+	if text.String() != "Hello" {
+		t.Errorf("text = %q, want Hello", text.String())
+	}
+}
+
 func TestBuildRequestBody_ToolMessages(t *testing.T) {
 	req := Request{
 		Model: Model{ID: "gpt-test"},

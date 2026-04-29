@@ -353,6 +353,21 @@ func TestRunnerUsesEntryInputAndModelPrecedence(t *testing.T) {
 		assert.NotContains(t, msg.Content, "<agent_loop>")
 	}
 
+	// Verify loop metadata is persisted on assistant messages.
+	var assistantMsgs []llm.Message
+	for _, msg := range ag.Messages() {
+		if msg.Role == llm.RoleAssistant {
+			assistantMsgs = append(assistantMsgs, msg)
+		}
+	}
+	require.Len(t, assistantMsgs, 4)
+	assert.Equal(t, "implement", assistantMsgs[0].Metadata["loop_name"])
+	assert.Equal(t, "entry", assistantMsgs[0].Metadata["loop_node_id"])
+	assert.Equal(t, string(NodeEntryPrompt), assistantMsgs[0].Metadata["loop_node_type"])
+	assert.Equal(t, "prompt", assistantMsgs[1].Metadata["loop_node_id"])
+	assert.Equal(t, "exit", assistantMsgs[2].Metadata["loop_node_id"])
+	assert.Equal(t, "final", assistantMsgs[3].Metadata["loop_node_id"])
+
 	require.GreaterOrEqual(t, len(client.requests[0].Messages), 2)
 	assert.Contains(t, client.requests[0].Messages[1].Content, "<agent_loop>")
 

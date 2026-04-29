@@ -441,6 +441,8 @@ func buildTools(cfg config.ToolConfig, skillActivator *skills.Activator) []agent
 		out = append(out, builtintools.Find(opts))
 	}
 
+	out = append(out, builtintools.Tree())
+
 	if skillActivator != nil && len(skillActivator.Registry().ModelVisibleSkills()) > 0 {
 		out = append(out, builtintools.ActivateSkill(skillActivator))
 	}
