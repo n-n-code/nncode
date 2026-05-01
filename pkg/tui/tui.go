@@ -24,7 +24,7 @@ func Run(
 	contextResolver func(context.Context) contextwindow.Window,
 ) error {
 	m := newModel(ag, cfg, sess, reg, activator, window, contextResolver)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	finalModel, err := p.Run()
 	if err != nil {

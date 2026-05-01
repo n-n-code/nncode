@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -28,7 +29,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.recalcLayout()
-		m.syncViewportContent()
+		m.syncViewportContent(false)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -67,17 +68,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = nil
 			m.turnTextLen = 0
 			m.inTurn = false
-			m.syncViewportContent()
+			m.syncViewportContent(true)
 			m.appendMessage(msgItem{Kind: kindAssistant, Text: "Context compressed. Summary:\n" + msg.summary})
 		}
 
-	default:
-		// Let bubbles handle their own messages (cursor blink, spinner tick, etc.).
+	case tea.MouseMsg:
+		// Mouse events route only to the viewport. Forwarding them to the
+		// textarea makes its render flicker to blank until the next keypress.
 		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
+		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
 
+	case spinner.TickMsg:
+		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		cmds = append(cmds, cmd)
+
+		if m.running {
+			m.thinkingDots = (m.thinkingDots + 1) % thinkingDotCount
+		}
+
+	default:
+		// Let bubbles handle their own messages (cursor blink, etc.).
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -102,34 +116,67 @@ func (m *model) handleKey(msg tea.KeyMsg) (*model, tea.Cmd) {
 	}
 
 	if m.textarea.Focused() {
-		//nolint:exhaustive // We only handle specific keys; all others pass to textarea.
-		switch msg.Type {
-		case tea.KeyEsc:
-			m.textarea.Blur()
-			return m, nil
-
-		case tea.KeyEnter:
-			if msg.Alt {
-				// Alt+Enter inserts newline in textarea.
-				var cmd tea.Cmd
-				m.textarea, cmd = m.textarea.Update(msg)
-				m.recalcLayout()
-
-				return m, cmd
-			}
-
-			return m.sendInput()
-
-		default:
-			var cmd tea.Cmd
-			m.textarea, cmd = m.textarea.Update(msg)
-			m.recalcLayout()
-
-			return m, cmd
-		}
+		return m.handleFocusedKey(msg)
 	}
 
-	// Unfocused global keys.
+	return m.handleUnfocusedKey(msg)
+}
+
+// handleFocusedKey handles key presses when the textarea is focused.
+func (m *model) handleFocusedKey(msg tea.KeyMsg) (*model, tea.Cmd) {
+	//nolint:exhaustive // We only handle specific keys; all others pass to textarea.
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.textarea.Blur()
+		return m, nil
+
+	case tea.KeyCtrlJ:
+		return m.insertNewline()
+
+	case tea.KeyEnter:
+		if msg.Alt {
+			return m.insertNewline()
+		}
+
+		return m.sendInput()
+
+	case tea.KeyCtrlUp:
+		m.viewport.ScrollUp(1)
+
+		return m, nil
+	case tea.KeyCtrlDown:
+		m.viewport.ScrollDown(1)
+
+		return m, nil
+	case tea.KeyPgUp, tea.KeyCtrlPgUp:
+		m.viewport.HalfPageUp()
+
+		return m, nil
+	case tea.KeyPgDown, tea.KeyCtrlPgDown:
+		m.viewport.HalfPageDown()
+
+		return m, nil
+
+	default:
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(msg)
+		m.recalcLayout()
+
+		return m, cmd
+	}
+}
+
+// insertNewline inserts a literal newline at the textarea cursor and resizes
+// the surrounding layout. Wired to ctrl+j (universal) and alt+enter.
+func (m *model) insertNewline() (*model, tea.Cmd) {
+	m.textarea.InsertRune('\n')
+	m.recalcLayout()
+
+	return m, nil
+}
+
+// handleUnfocusedKey handles key presses when the textarea is not focused.
+func (m *model) handleUnfocusedKey(msg tea.KeyMsg) (*model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "Q":
 		m.saveSession()
@@ -192,7 +239,8 @@ func (m *model) sendInput() (*model, tea.Cmd) {
 		return m.handleSlashCommand(input)
 	}
 
-	m.appendMessage(msgItem{Kind: kindUser, Text: input})
+	m.messages = append(m.messages, msgItem{Kind: kindUser, Text: input})
+	m.syncViewportContent(true)
 	m.running = true
 	m.textarea.Blur()
 
@@ -264,7 +312,7 @@ func (m *model) handleReset() {
 	m.messages = nil
 	m.turnTextLen = 0
 	m.inTurn = false
-	m.syncViewportContent()
+	m.syncViewportContent(true)
 }
 
 func (m *model) handleCompress() (*model, tea.Cmd) {
@@ -433,7 +481,7 @@ func (m *model) handleAgentEvent(ev agent.Event) {
 			last := &m.messages[n-1]
 			if last.Kind == kindToolCall && last.ToolName == ev.ToolName {
 				last.ToolArgs = ev.ToolArgs
-				m.syncViewportContent()
+				m.syncViewportContent(false)
 			}
 		}
 	case agent.EventToolResult:
@@ -501,7 +549,7 @@ func (m *model) resumeSession(ref string) {
 		}
 	}
 
-	m.syncViewportContent()
+	m.syncViewportContent(true)
 	m.appendMessage(msgItem{Kind: kindAssistant, Text: fmt.Sprintf(
 		"Resumed session %s (%d messages).", loaded.ID, len(loaded.Messages),
 	)})
