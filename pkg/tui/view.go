@@ -12,7 +12,12 @@ func (m *model) View() string {
 		return ""
 	}
 
-	body := fillBlock(Body, m.viewport.View(), m.width, m.viewport.Height)
+	vpWithScroll := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		fillBlock(Body, m.viewport.View(), m.viewport.Width, m.viewport.Height),
+		m.scrollbarView(),
+	)
+	body := fillBlock(Body, vpWithScroll, m.width, m.viewport.Height)
 	if m.overlay != overlayNone {
 		body = m.bodyWithOverlay()
 	}

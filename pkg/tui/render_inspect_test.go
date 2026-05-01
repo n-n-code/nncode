@@ -142,6 +142,6 @@ func TestFullViewBodyHasContinuousBackground(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	m.recalcLayout()
-	m.syncViewportContent()
+	m.syncViewportContent(false)
 	assertContiguousBackground(t, "fullView", m.View())
 }

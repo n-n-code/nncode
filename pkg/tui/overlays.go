@@ -554,7 +554,8 @@ func (m *model) helpOverlayContent(width, height int) string {
 		{"/loop <name> [msg]", "Run an Agent Loop, optionally with msg"},
 		{"/loop-validate <name|path>", "Validate Agent Loop file"},
 		{"/prompt", "Show the current system prompt"},
-		{"alt+enter", "Insert a newline while typing"},
+		{"shift+enter", "Insert a newline (alt+enter fallback)"},
+		{"ctrl+↑/↓", "Scroll chat while typing"},
 		{"esc", "Leave input focus or close a popup"},
 	}
 
@@ -973,7 +974,9 @@ func helpOverlayItems() []string {
 		"/loop <name> [msg] Run an Agent Loop, optionally with msg",
 		"/loop-validate <name|path> Validate Agent Loop file",
 		"/prompt            Show the current system prompt",
-		"alt+enter          Insert a newline while typing",
+		"ctrl+j / alt+enter Insert a newline",
+		"pgup / pgdn        Scroll chat by half a page",
+		"ctrl+↑/↓           Scroll chat by one line while typing",
 		"esc                Leave input focus or close a popup",
 	}
 }

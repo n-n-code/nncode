@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -391,7 +392,7 @@ func TestViewContainsHeaderAndStatus(t *testing.T) {
 
 	view := m.View()
 	assert.Contains(t, view, "nⁿcode")
-	assert.Contains(t, view, "MODE")
+	assert.Contains(t, view, "ready")
 	assert.Contains(t, view, "test")
 }
 
@@ -687,4 +688,109 @@ func TestHandleKey_BlockedWhileCompressing(t *testing.T) {
 
 	assert.True(t, m.compressing)
 	assert.Nil(t, cmd)
+}
+
+func TestViewportPreservesScrollWhenNotAtBottom(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+
+	// Fill viewport with enough messages to exceed viewport height.
+	for i := range 50 {
+		m.messages = append(m.messages, msgItem{Kind: kindUser, Text: fmt.Sprintf("line %d", i)})
+	}
+	m.syncViewportContent(false)
+	require.True(t, m.viewport.AtBottom(), "should start at bottom")
+
+	// Scroll up manually.
+	m.viewport.ScrollUp(10)
+	require.False(t, m.viewport.AtBottom(), "should have scrolled up")
+	savedYOffset := m.viewport.YOffset
+
+	// Append a new message while scrolled up.
+	m.appendMessage(msgItem{Kind: kindUser, Text: "new message"})
+
+	assert.False(t, m.viewport.AtBottom(), "should still not be at bottom after append")
+	assert.Equal(t, savedYOffset, m.viewport.YOffset, "scroll position should be preserved")
+}
+
+func TestViewportAutoScrollsWhenAtBottom(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+
+	for i := range 10 {
+		m.messages = append(m.messages, msgItem{Kind: kindUser, Text: fmt.Sprintf("line %d", i)})
+	}
+	m.syncViewportContent(false)
+	require.True(t, m.viewport.AtBottom())
+
+	m.appendMessage(msgItem{Kind: kindUser, Text: "new message"})
+
+	assert.True(t, m.viewport.AtBottom(), "should still be at bottom after append")
+}
+
+func TestSendInputForcesScrollToBottom(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+
+	for i := range 50 {
+		m.messages = append(m.messages, msgItem{Kind: kindUser, Text: fmt.Sprintf("line %d", i)})
+	}
+	m.syncViewportContent(false)
+	require.True(t, m.viewport.AtBottom())
+
+	// Scroll up.
+	m.viewport.ScrollUp(10)
+	require.False(t, m.viewport.AtBottom())
+
+	// Simulate typing and sending.
+	m.textarea.SetValue("hello")
+	updated, _ := m.sendInput()
+	m = updated
+
+	assert.True(t, m.viewport.AtBottom(), "sendInput should force viewport to bottom")
+}
+
+func TestScrollbarNoThumbWhenContentFits(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+
+	// Fewer messages than viewport height — no overflow.
+	m.messages = append(m.messages, msgItem{Kind: kindUser, Text: "hello"})
+	m.syncViewportContent(false)
+
+	scrollBar := m.scrollbarView()
+	assert.NotContains(t, scrollBar, "┃", "scrollbar should not contain a thumb when content fits")
+	assert.Contains(t, scrollBar, "│", "scrollbar should still render a track")
+}
+
+func TestHandleFocusedKeyCtrlUpDownScrollsViewport(t *testing.T) {
+	m := newTestModel(&mockClient{})
+	m.width = 80
+	m.height = 24
+	m.recalcLayout()
+	m.textarea.Focus()
+
+	for i := range 50 {
+		m.messages = append(m.messages, msgItem{Kind: kindUser, Text: fmt.Sprintf("line %d", i)})
+	}
+	m.syncViewportContent(false)
+	require.True(t, m.viewport.AtBottom())
+
+	// Ctrl+Up should scroll up even while textarea is focused.
+	updated, _ := m.handleFocusedKey(tea.KeyMsg{Type: tea.KeyCtrlUp})
+	m = updated
+	assert.False(t, m.viewport.AtBottom(), "ctrl+up should scroll viewport up")
+
+	// Ctrl+Down should scroll back down.
+	updated, _ = m.handleFocusedKey(tea.KeyMsg{Type: tea.KeyCtrlDown})
+	m = updated
+	assert.True(t, m.viewport.AtBottom(), "ctrl+down should scroll viewport to bottom")
 }

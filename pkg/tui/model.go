@@ -39,10 +39,14 @@ const (
 	overlayVerticalFrame  = 4
 	barHorizontalPadding  = 1 // matches Padding(0, 1) on HeaderBar/StatusBar.
 	dividersInFrame       = 3
+	scrollbarWidth        = 1
 
 	// tokenEstimateDivisor is the rough chars-per-token heuristic used for
 	// live completion-token estimates while the stream is in progress.
 	tokenEstimateDivisor = 4
+
+	// thinkingDotCount is the number of animated dot states ("", ".", "..", "...").
+	thinkingDotCount = 4
 )
 
 // toolConfirmReq carries an effectful tool confirmation request from the agent.
@@ -122,6 +126,9 @@ type model struct {
 	turnTextLen int
 	inTurn      bool
 
+	// Thinking animation dots cycle (0-3).
+	thinkingDots int
+
 	// Effectful tool confirmation.
 	confirmReqCh   chan toolConfirmReq
 	pendingConfirm *toolConfirmReq
@@ -168,6 +175,7 @@ func newModel(
 
 	vp := viewport.New(defaultTermWidth, defaultVPHHeight)
 	vp.Style = Body
+	vp.MouseWheelEnabled = true
 
 	mod := &model{
 		agent:           agentM,
@@ -233,19 +241,25 @@ func (m *model) recalcLayout() {
 	inputHeight := max(m.textarea.Height(), textareaMinLines)
 	vpHeight := max(m.height-headerHeight-statusHeight-inputHeight-dividerHeight*dividersInFrame, viewportMinHeight)
 
-	m.viewport.Width = max(m.width-2*viewportHorizontalPad, 1)
+	m.viewport.Width = max(m.width-2*viewportHorizontalPad-scrollbarWidth, 1)
 	m.viewport.Height = vpHeight
 
 	m.textarea.SetWidth(m.width)
 }
 
-// syncViewportContent rebuilds the viewport content from messages and scrolls to bottom.
-func (m *model) syncViewportContent() {
+// syncViewportContent rebuilds the viewport content from messages and preserves
+// the user's scroll position unless they were already at the bottom or
+// forceBottom is true.
+func (m *model) syncViewportContent(forceBottom bool) {
 	if len(m.messages) == 0 {
 		m.viewport.SetContent(m.welcomeView())
+		m.viewport.GotoBottom()
 
 		return
 	}
+
+	wasAtBottom := forceBottom || m.viewport.AtBottom()
+	oldYOffset := m.viewport.YOffset
 
 	var builder strings.Builder
 	for i, msg := range m.messages {
@@ -257,7 +271,12 @@ func (m *model) syncViewportContent() {
 	}
 
 	m.viewport.SetContent(builder.String())
-	m.viewport.GotoBottom()
+
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	} else {
+		m.viewport.YOffset = min(oldYOffset, max(0, m.viewport.TotalLineCount()-m.viewport.Height))
+	}
 }
 
 // welcomeView renders the centered empty-state branding as a single
@@ -274,7 +293,7 @@ func (m *model) welcomeView() string {
 		{"nⁿcode", ColorBrightGreen, true},
 		{"", ColorBlack, false},
 		{"Type a message to start coding with AI.", ColorCRTGreenSoft, false},
-		{"Press ? for help, ctrl+c to quit.", ColorMutedGreen, false},
+		{"Press [/help] for help, [ctrl+c] to quit.", ColorMutedGreen, false},
 	}
 
 	innerWidth := 0
@@ -303,7 +322,7 @@ func (m *model) welcomeView() string {
 // appendMessage adds a message and refreshes the viewport.
 func (m *model) appendMessage(msg msgItem) {
 	m.messages = append(m.messages, msg)
-	m.syncViewportContent()
+	m.syncViewportContent(false)
 }
 
 // updateLastAssistantText appends text to the most recent assistant message.
@@ -322,7 +341,7 @@ func (m *model) updateLastAssistantText(text string) {
 	}
 
 	last.Text += text
-	m.syncViewportContent()
+	m.syncViewportContent(false)
 }
 
 // effectfulToolConfirm is the callback registered with the agent. It blocks
@@ -359,13 +378,8 @@ func (m *model) headerView() string {
 	return m.renderBar(HeaderBar, logo, info)
 }
 
-// statusView renders the status bar.
+// statusView renders the status bar with left stats, centered mode, and right hints.
 func (m *model) statusView() string {
-	mode := "ready"
-	if m.running {
-		mode = m.spinner.View() + " thinking"
-	}
-
 	const groupGap = 4
 
 	barBG := StatusBar.GetBackground()
@@ -387,20 +401,45 @@ func (m *model) statusView() string {
 		contextStr = lipgloss.NewStyle().Foreground(ColorWarningAmber).Render(contextStr)
 	}
 
+	const thinkingInnerWidth = 13 // spinner(1) + " thinking"(9) + "..."(3)
+	idleInner := padRight("ready", thinkingInnerWidth)
+	mode := renderModePill(StatusMode.Render(" "+idleInner+" "), false)
+	if m.running {
+		dots := strings.Repeat(".", m.thinkingDots)
+		inner := m.spinner.View() + " thinking" + dots
+		inner = padRight(inner, thinkingInnerWidth)
+		mode = renderModePill(StatusMode.Render(" "+inner+" "), true)
+	}
+
 	leftSep := barSpacer(2, barBG) + dot + barSpacer(2, barBG)
-	left := joinStatusPairs(barBG, leftSep, [][2]string{
-		{"MODE", mode},
+	statsBar := joinStatusPairs(barBG, leftSep, [][2]string{
 		{"MSGS", strconv.Itoa(len(m.agent.Messages()))},
 		{"TOKENS", tokenStr},
 		{"CTX", contextStr},
 	})
+	left := mode + barSpacer(groupGap, barBG) + statsBar
 
 	right := joinStatusPairs(barBG, barSpacer(groupGap, barBG), [][2]string{
-		{"?", "help"},
-		{"ctrl+c", "quit"},
+		{"[/help]", "help"},
+		{"[ctrl c]", "quit"},
 	})
 
 	return m.renderBar(StatusBar, left, right)
+}
+
+// renderModePill wraps a mode body string with bright-green vertical bar
+// edges on a black background, producing a 1-row bordered pill that floats
+// over the green status bar. The non-running variant uses a dimmed edge color
+// so the frame width stays constant whether the agent is idle or thinking.
+func renderModePill(body string, running bool) string {
+	edgeFG := ColorCRTGreenDim
+	if running {
+		edgeFG = ColorBrightGreen
+	}
+
+	edge := lipgloss.NewStyle().Foreground(edgeFG).Background(ColorBlack)
+
+	return edge.Render("▌") + body + edge.Render("▐")
 }
 
 // joinStatusPairs renders [{key,val}, ...] with a one-cell bg-filled gap
@@ -436,6 +475,41 @@ func (m *model) renderBar(style lipgloss.Style, left, right string) string {
 	spacer := barSpacer(gap, style.GetBackground())
 
 	return style.Width(m.width).Render(left + spacer + right)
+}
+
+// scrollbarView renders a vertical scrollbar for the viewport.
+func (m *model) scrollbarView() string {
+	bg := ColorBlack
+	trackStyle := lipgloss.NewStyle().Foreground(ColorCRTShadow).Background(bg)
+	thumbStyle := lipgloss.NewStyle().Foreground(ColorCRTGreenDim).Background(bg)
+
+	total := m.viewport.TotalLineCount()
+	height := m.viewport.Height
+
+	// When all content fits, render a pure track with no thumb.
+	if total <= height {
+		lines := make([]string, height)
+		for i := range height {
+			lines[i] = trackStyle.Render("│")
+		}
+
+		return strings.Join(lines, "\n")
+	}
+
+	thumbHeight := max(height*height/total, 1)
+	percent := m.viewport.ScrollPercent()
+	thumbPos := int(percent * float64(height-thumbHeight))
+
+	lines := make([]string, height)
+	for i := range height {
+		if i >= thumbPos && i < thumbPos+thumbHeight {
+			lines[i] = thumbStyle.Render("┃")
+		} else {
+			lines[i] = trackStyle.Render("│")
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // barSpacer renders a run of width cells in the given background, so that

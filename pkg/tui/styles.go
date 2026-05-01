@@ -234,6 +234,12 @@ var (
 
 	// Spinner is the spinner / waiting indicator style.
 	Spinner = lipgloss.NewStyle().
-		Foreground(ColorCRTGreenSoft).
+		Foreground(ColorBrightGreen).
 		Background(ColorBlack)
+
+	// StatusMode is the status bar mode value style (ready / thinking).
+	// Renders inside a bordered black pill that sits on top of the bar.
+	StatusMode = lipgloss.NewStyle().
+			Foreground(ColorBrightGreen).
+			Background(ColorBlack)
 )
